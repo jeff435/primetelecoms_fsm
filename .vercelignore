@@ -1,0 +1,10 @@
+# Version control and environment
+.git/
+.gitignore
+.env
+.env.local
+.vscode/
+
+# Package manager temporary files
+node_modules/
+.npm

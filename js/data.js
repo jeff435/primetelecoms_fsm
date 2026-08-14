@@ -86,8 +86,9 @@ function _startMyProfileListener(uid) {
         const orgChanged = data.organizationId !== _currentProfile.organizationId;
         const roleOrActiveChanged = data.role !== _currentProfile.role || data.active !== _currentProfile.active;
         if (orgChanged || roleOrActiveChanged) {
+          const roleChanged = data.role !== _currentProfile.role;
           _currentProfile = { ..._currentProfile, ...data };
-          if (orgChanged) {
+          if (orgChanged || roleChanged) {
             // organizationId changed under this signed-in user — most
             // commonly a server-side migration correcting a stale value
             // via the Admin SDK (clients can never change this field
@@ -98,6 +99,12 @@ function _startMyProfileListener(uid) {
             // every one of them starts failing with permission-denied,
             // because firestore.rules re-reads organizationId fresh on
             // every check and it no longer matches the query's filter.
+            //
+            // A role change (a manager just toggled this user between
+            // customer <-> technician via isManagerRoleToggle()) needs the
+            // exact same treatment: the jobs/reports queries are shaped
+            // per-role (see startOrgListeners below), so the OLD role's
+            // query is now the wrong query and has to be rebuilt too.
             startOrgListeners(data.organizationId);
           }
           // Role or active-flag changed under this user (e.g. a manager
@@ -122,17 +129,46 @@ function startOrgListeners(orgId) {
   _orgUsersCache = [];
   _customersCache = [];
 
-  _unsubJobs = db.collection("jobs").where("organizationId", "==", orgId)
-    .onSnapshot(
-      (snap) => { _jobsCache = snap.docs.map((d) => ({ id: d.id, ...d.data() })); _emitDataChanged(); },
-      (e) => console.error("[Jobs] listener error:", e)
-    );
+  // Jobs/reports are the two collections where firestore.rules grants
+  // different people different SLICES of the org's data, not just an
+  // org-wide yes/no: a manager can read every job, but a technician may
+  // only read jobs assignedTo them, and a customer only jobs that are
+  // theirs (see /jobs and /reports in firestore.rules). Firestore refuses
+  // to run a LIST query at all — not "returns fewer results", but an
+  // outright "Missing or insufficient permissions" on the whole query —
+  // unless the query's own .where() filters make it structurally
+  // impossible for it to return a document the rules would deny. So the
+  // query shape here has to mirror the rule exactly for each role, not
+  // just filter by organizationId and rely on the rule to sort it out.
+  const role = _currentProfile && _currentProfile.role;
+  const myUid = _currentProfile && _currentProfile.id;
 
-  _unsubReports = db.collection("reports").where("organizationId", "==", orgId)
-    .onSnapshot(
-      (snap) => { _reportsCache = snap.docs.map((d) => ({ id: d.id, ...d.data() })); _emitDataChanged(); },
-      (e) => console.error("[Reports] listener error:", e)
-    );
+  let jobsQuery = db.collection("jobs").where("organizationId", "==", orgId);
+  if (role === "technician") jobsQuery = jobsQuery.where("assignedTo", "==", myUid);
+  else if (role === "customer") jobsQuery = jobsQuery.where("customerId", "==", myUid);
+  // managers keep the unfiltered org-wide query — matches isManager() in the rule
+
+  _unsubJobs = jobsQuery.onSnapshot(
+    (snap) => { _jobsCache = snap.docs.map((d) => ({ id: d.id, ...d.data() })); _emitDataChanged(); },
+    (e) => console.error("[Jobs] listener error:", e)
+  );
+
+  // Same story for reports, with one extra wrinkle: the rule's customer
+  // branch checks the PARENT JOB's customerId via get(jobs/...), and a
+  // rule condition that depends on get()-ing a DIFFERENT document can
+  // never be proven safe for a list query no matter how it's filtered —
+  // there's no field on the query itself Firestore can point to as a
+  // guarantee. So reports carry their own denormalized customerId,
+  // stamped on at creation time (see Reports.create below), and both the
+  // query here and the rule filter on that copy directly instead.
+  let reportsQuery = db.collection("reports").where("organizationId", "==", orgId);
+  if (role === "technician") reportsQuery = reportsQuery.where("technicianId", "==", myUid);
+  else if (role === "customer") reportsQuery = reportsQuery.where("customerId", "==", myUid);
+
+  _unsubReports = reportsQuery.onSnapshot(
+    (snap) => { _reportsCache = snap.docs.map((d) => ({ id: d.id, ...d.data() })); _emitDataChanged(); },
+    (e) => console.error("[Reports] listener error:", e)
+  );
 
   // Managers + technicians only (customers are excluded from the staff roster)
   _unsubUsers = db.collection("users").where("organizationId", "==", orgId)
@@ -295,11 +331,17 @@ const Reports = {
     const db = _getFirestore();
     const me = Auth.currentUser();
     const ref = db ? db.collection("reports").doc() : { id: uid("rpt") };
+    const parentJob = Jobs.get(data.jobId);
     const report = {
       id: ref.id,
       status: "submitted",
       submittedAt: new Date().toISOString(),
       organizationId: (me && me.organizationId) || data.organizationId || DEFAULT_ORG_ID,
+      // Copied from the parent job so the customer's report-listing query
+      // (startOrgListeners above) can filter on customerId directly — see
+      // the comment there for why a get()-based rule can't back a list
+      // query no matter how it's filtered.
+      customerId: parentJob ? parentJob.customerId : data.customerId,
       ...data,
     };
     _reportsCache.push(report);

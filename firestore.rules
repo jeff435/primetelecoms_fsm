@@ -151,20 +151,29 @@ service cloud.firestore {
 
     // ── Service Reports (/reports/{reportId}) ─────────────────────────────
     match /reports/{reportId} {
+      // The customer branch checks resource.data.customerId directly
+      // (denormalized onto the report at creation, see data.js
+      // Reports.create) rather than get()-ing the parent job. A rule that
+      // depends on get()-ing a DIFFERENT document can never be proven safe
+      // for a LIST query — Firestore rejects the whole query outright,
+      // not just the documents it can't verify — so customers listing
+      // their own reports need a field on the report itself to filter on.
       allow read: if isAuth() && myOrg() == resource.data.organizationId && (
         isManager() ||
         (isTechnician() && resource.data.technicianId == request.auth.uid) ||
-        (
-          isCustomer() &&
-          get(/databases/$(database)/documents/jobs/$(resource.data.jobId)).data.customerId == request.auth.uid
-        )
+        (isCustomer() && resource.data.customerId == request.auth.uid)
       );
 
-      // Only the assigned technician can file the report for their own job.
+      // Only the assigned technician can file the report for their own job,
+      // and the customerId they stamp on it must match the job's real
+      // customerId — this is the one place customerId is still checked via
+      // get(), which is fine here because create/get validate a single
+      // document, not a list query.
       allow create: if isAuth() && isTechnician()
         && request.resource.data.organizationId == myOrg()
         && request.resource.data.technicianId == request.auth.uid
-        && get(/databases/$(database)/documents/jobs/$(request.resource.data.jobId)).data.assignedTo == request.auth.uid;
+        && get(/databases/$(database)/documents/jobs/$(request.resource.data.jobId)).data.assignedTo == request.auth.uid
+        && request.resource.data.customerId == get(/databases/$(database)/documents/jobs/$(request.resource.data.jobId)).data.customerId;
 
       // Only a manager can review/approve a submitted report.
       allow update: if isAuth() && isManager() && myOrg() == resource.data.organizationId;

@@ -40,7 +40,10 @@ const TARGET_ORG_ID = "org_primetelecoms";
 const APPLY = process.argv.includes("--apply");
 const COLLECTIONS = ["users", "jobs", "reports"];
 
-admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount),
+  databaseURL: "https://planning-with-ai-f9dd4-default-rtdb.asia-southeast1.firebasedatabase.app"
+});
 const db = admin.firestore();
 
 async function migrateCollection(name) {

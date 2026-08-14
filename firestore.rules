@@ -39,6 +39,22 @@ service cloud.firestore {
           && request.resource.data.organizationId == resource.data.organizationId;
     }
 
+    // Lets a signed-in user correct THEIR OWN profile's organizationId back
+    // to this deployment's single canonical org — nothing else. This exists
+    // because this is a single-tenant deployment (every account is meant to
+    // share DEFAULT_ORG_ID from js/data.js) and some older accounts were
+    // written with a stale/mismatched organizationId before that was
+    // enforced, which silently hid their jobs from everyone else's org-
+    // scoped queries. It deliberately only allows moving TO the one known-
+    // good value (never to an arbitrary org, never touching role), so it
+    // can't be used to hop into someone else's tenant.
+    function isOrgSelfHeal(uid) {
+      return isOwner(uid)
+          && request.resource.data.role == resource.data.role
+          && request.resource.data.organizationId == "org_primetelecoms"
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["organizationId"]);
+    }
+
     // A manager may flip a customer<->technician role for someone in their
     // own org — but this NEVER grants the "manager" role itself (that stays
     // self-service-registration-only, see /users create rule above) and it
@@ -91,7 +107,7 @@ service cloud.firestore {
           isOwner(userId) ||
           (isManager() && myOrg() == resource.data.organizationId && resource.data.role == "technician")
         )
-      ) || isManagerRoleToggle();
+      ) || isManagerRoleToggle() || isOrgSelfHeal(userId);
     }
 
     // ── Technician Authorizations (/tech_authorizations/{email}) ─────────────

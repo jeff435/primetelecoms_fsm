@@ -106,7 +106,7 @@ function router() {
   // completely different view per role (see the switch below) — this is
   // enforced in code, not just hidden in the nav, so typing the hash
   // directly can't bypass it either.
-  const managerOnlyRoutes = ["staff", "customers"];
+  const managerOnlyRoutes = ["staff", "customers", "reviews"];
   const customerBlockedRoutes = ["staff", "reports"];
   if (user.role !== "manager" && managerOnlyRoutes.includes(route)) {
     navigate("dashboard");
@@ -158,6 +158,12 @@ function router() {
       // Only managers reach here (guard above) — this is the admin panel
       // that controls who is granted the technician role.
       renderStaffList(content, user);
+      break;
+
+    case "reviews":
+      // Only managers reach here (guard above) — every customer review
+      // (star rating + comment) left across all jobs, org-wide.
+      renderReviewsList(content, user);
       break;
 
     case "customers":
@@ -653,6 +659,7 @@ function renderShell(user) {
           <a href="#jobs/new" class="pt-nav-link"><i>&#10133;</i> Assign New Job</a>
           <a href="#staff" class="pt-nav-link" data-nav="staff"><i>&#128101;</i> Technicians</a>
           <a href="#customers" class="pt-nav-link" data-nav="customers"><i>&#128100;</i> Customers</a>
+          <a href="#reviews" class="pt-nav-link" data-nav="reviews"><i>&#11088;</i> Customer Reviews</a>
   ` : isTechnician ? `
           <a href="#dashboard" class="pt-nav-link" data-nav="dashboard"><i>&#9635;</i> Dashboard</a>
           <a href="#jobs" class="pt-nav-link" data-nav="jobs"><i>&#128188;</i> My Jobs</a>
@@ -1628,9 +1635,10 @@ function renderStaffList(el, user) {
   const staff = Users.all();
   el.innerHTML = `
     <div class="pt-card" style="max-width:600px;margin-bottom:20px;">
-      <div class="pt-card-title">&#128101; Authorize a New Technician</div>
+      <div class="pt-card-title">&#128101; Add a Technician</div>
       <p style="font-size:13px;color:#64748b;margin-bottom:14px;">
-        Enter the technician's email and their name. They will then visit the login page → "Activate Technician Account" and enter this exact email to set their password.
+        Set a password here to create their account instantly — give them the email and password so they can sign in right away.
+        Leave the password blank to just authorize the email instead — they'll set their own password later from the login page → "Activate Technician Account".
       </p>
       <div id="auth-tech-err" style="display:none;background:#FBE1E1;color:#D64545;padding:9px 12px;border-radius:9px;font-size:12.5px;margin-bottom:10px;"></div>
       <div id="auth-tech-ok"  style="display:none;background:#dcfce7;color:#166534;padding:9px 12px;border-radius:9px;font-size:12.5px;margin-bottom:10px;"></div>
@@ -1642,11 +1650,20 @@ function renderStaffList(el, user) {
         <label class="form-label">Technician Email (they must use this exact email)</label>
         <input type="email" class="form-control" id="auth-email" placeholder="technician@example.com">
       </div>
-      <div class="field">
-        <label class="form-label">Employee ID (optional)</label>
-        <input type="text" class="form-control" id="auth-empid" placeholder="e.g. PT-014">
+      <div class="form-row cols-2" style="margin-bottom:0;">
+        <div>
+          <label class="form-label">Employee ID (optional)</label>
+          <input type="text" class="form-control" id="auth-empid" placeholder="e.g. PT-014">
+        </div>
+        <div>
+          <label class="form-label">Set Their Password (optional)</label>
+          <div style="display:flex;gap:6px;">
+            <input type="text" class="form-control" id="auth-pw" placeholder="Min. 6 characters">
+            <button type="button" class="btn btn-pt-outline btn-sm" id="btn-gen-pw" style="white-space:nowrap;">Generate</button>
+          </div>
+        </div>
       </div>
-      <button class="btn btn-pt-primary" id="btn-auth-tech">Grant Technician Access</button>
+      <button class="btn btn-pt-primary mt-3" id="btn-auth-tech">Grant Technician Access</button>
     </div>
 
     <div class="pt-page-header"><div></div></div>
@@ -1673,13 +1690,27 @@ function renderStaffList(el, user) {
     </div>
   `;
 
-  // Authorize technician button handler
+  // "Generate" fills in a random, reasonably strong temporary password.
+  document.getElementById("btn-gen-pw").addEventListener("click", () => {
+    const chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789!@#$";
+    let pw = "";
+    for (let i = 0; i < 10; i++) pw += chars[Math.floor(Math.random() * chars.length)];
+    const pwInput = document.getElementById("auth-pw");
+    pwInput.value = pw;
+    pwInput.type = "text";
+  });
+
+  // Add-technician button handler. With a password: creates the Firebase
+  // Auth account + profile immediately (manager-set password, technician
+  // can log in right away). Without one: falls back to the original
+  // authorize-only flow (technician sets their own password later).
   document.getElementById("btn-auth-tech").addEventListener("click", async () => {
     const btn   = document.getElementById("btn-auth-tech");
     const fname = document.getElementById("auth-fname").value.trim();
     const lname = document.getElementById("auth-lname").value.trim();
     const email = document.getElementById("auth-email").value.trim().toLowerCase();
     const empId = document.getElementById("auth-empid").value.trim();
+    const pw    = document.getElementById("auth-pw").value;
     const errEl = document.getElementById("auth-tech-err");
     const okEl  = document.getElementById("auth-tech-ok");
 
@@ -1687,23 +1718,33 @@ function renderStaffList(el, user) {
     okEl.style.display  = "none";
 
     if (!email) { errEl.textContent = "Please enter the technician's email."; errEl.style.display = "block"; return; }
+    if (pw && pw.length < 6) { errEl.textContent = "Password must be at least 6 characters (or leave it blank)."; errEl.style.display = "block"; return; }
 
     btn.disabled    = true;
-    btn.textContent = "Authorizing…";
 
     try {
-      await Auth.authorizeTechnician(user.organizationId || DEFAULT_ORG_ID, email, {
-        firstName: fname, lastName: lname, employeeId: empId,
-      });
-      okEl.textContent = `✓ ${email} has been authorized. Share the activation link with them: ${window.location.origin}#login`;
-      okEl.style.display = "block";
+      if (pw) {
+        btn.textContent = "Creating account…";
+        await Auth.managerCreateTechnician(email, pw, { firstName: fname, lastName: lname, employeeId: empId });
+        okEl.textContent = `✓ Account created for ${email}. Give them this email and password to sign in — they can change the password later from their profile.`;
+        okEl.style.display = "block";
+        toast(`Technician account created for ${email}`, "success");
+      } else {
+        btn.textContent = "Authorizing…";
+        await Auth.authorizeTechnician(user.organizationId || DEFAULT_ORG_ID, email, {
+          firstName: fname, lastName: lname, employeeId: empId,
+        });
+        okEl.textContent = `✓ ${email} has been authorized. Share the activation link with them: ${window.location.origin}#login`;
+        okEl.style.display = "block";
+        toast(`Technician access granted to ${email}`, "success");
+      }
       document.getElementById("auth-email").value = "";
       document.getElementById("auth-fname").value = "";
       document.getElementById("auth-lname").value = "";
       document.getElementById("auth-empid").value = "";
-      toast(`Technician access granted to ${email}`, "success");
+      document.getElementById("auth-pw").value = "";
     } catch (err) {
-      errEl.textContent = err.message || "Failed to authorize technician. Please try again.";
+      errEl.textContent = Auth.getErrorMessage(err.code) || err.message || "Failed to add technician. Please try again.";
       errEl.style.display = "block";
     } finally {
       btn.disabled    = false;
@@ -1750,6 +1791,38 @@ function renderStaffList(el, user) {
       }
     });
   });
+}
+
+/* ============================================================
+   REVIEWS (manager-only: every customer review, org-wide)
+   ============================================================ */
+function renderReviewsList(el, user) {
+  setPageTitle("Customer Reviews", "Feedback customers left after their job was completed");
+  const reviews = Jobs.reviews();
+  const avg = reviews.length ? (reviews.reduce((s, j) => s + j.rating, 0) / reviews.length) : 0;
+
+  el.innerHTML = `
+    <div class="pt-grid-2-even" style="margin-bottom:18px;">
+      <div class="pt-stat-card"><div class="pt-stat-icon pt-icon-amber">&#9733;</div><div><div class="pt-stat-value">${avg ? avg.toFixed(1) : "—"}</div><div class="pt-stat-label">Average Rating</div></div></div>
+      <div class="pt-stat-card"><div class="pt-stat-icon pt-icon-blue">&#11088;</div><div><div class="pt-stat-value">${reviews.length}</div><div class="pt-stat-label">Total Reviews</div></div></div>
+    </div>
+    <div class="pt-card">
+      <div class="pt-card-title">All Reviews</div>
+      ${reviews.length ? `
+      <div class="pt-table-wrap"><table class="pt-table"><thead><tr><th>Job</th><th>Customer</th><th>Technician</th><th>Rating</th><th>Comment</th><th>Date</th></tr></thead><tbody>
+        ${reviews.map((j) => `
+          <tr data-goto="#jobs/${j.id}">
+            <td><strong>${j.jobNumber}</strong><br><span class="text-muted" style="font-size:12px;">${escapeHtml(j.title)}</span></td>
+            <td>${escapeHtml(j.customerName)}</td>
+            <td>${escapeHtml(Users.fullName(Users.get(j.assignedTo)))}</td>
+            <td>${starRating(j.rating)}</td>
+            <td style="max-width:280px;">${j.reviewComment ? escapeHtml(j.reviewComment) : `<span class="text-muted">—</span>`}</td>
+            <td>${fmtDate(j.reviewedAt)}</td>
+          </tr>`).join("")}
+      </tbody></table></div>` : `<div class="pt-empty-state"><i>&#11088;</i>No reviews yet — they'll appear here as soon as customers rate a completed job.</div>`}
+    </div>
+  `;
+  attachRowNav(el);
 }
 
 /* ============================================================

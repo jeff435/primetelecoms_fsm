@@ -1,7 +1,6 @@
 {
   "dependencies": {
     "@dataconnect/generated": "file:src/dataconnect-generated",
-    "firebase": "^12.17.1",
-    "firebase-admin": "^14.2.0"
+    "firebase": "^12.17.1"
   }
 }

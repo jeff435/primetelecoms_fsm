@@ -55,6 +55,23 @@ function _emitDataChanged() {
   window.dispatchEvent(new CustomEvent("pt:data-changed"));
 }
 
+// Firestore listener errors used to just vanish into console.error, leaving
+// the UI stuck on an empty/stale list with no clue why (this is exactly
+// what "my jobs aren't showing" turns out to be most of the time —
+// permission-denied from undeployed rules or an organizationId mismatch).
+// Dedup per-collection so a flaky connection doesn't spam the same toast
+// on every reconnect attempt.
+const _warnedListeners = new Set();
+function _reportListenerError(label, e) {
+  console.error(`[${label}] listener error:`, e);
+  if (_warnedListeners.has(label)) return;
+  _warnedListeners.add(label);
+  const reason = e && e.code ? e.code : (e && e.message) || "unknown error";
+  if (typeof toast === "function") {
+    toast(`Couldn't load ${label.toLowerCase()} (${reason}). Try refreshing — if it keeps happening, Firestore rules may need re-deploying.`, "error");
+  }
+}
+
 function stopOrgListeners() {
   if (_unsubJobs) { _unsubJobs(); _unsubJobs = null; }
   if (_unsubReports) { _unsubReports(); _unsubReports = null; }
@@ -150,7 +167,7 @@ function startOrgListeners(orgId) {
 
   _unsubJobs = jobsQuery.onSnapshot(
     (snap) => { _jobsCache = snap.docs.map((d) => ({ id: d.id, ...d.data() })); _emitDataChanged(); },
-    (e) => console.error("[Jobs] listener error:", e)
+    (e) => _reportListenerError("Jobs", e)
   );
 
   // Same story for reports, with one extra wrinkle: the rule's customer
@@ -167,7 +184,7 @@ function startOrgListeners(orgId) {
 
   _unsubReports = reportsQuery.onSnapshot(
     (snap) => { _reportsCache = snap.docs.map((d) => ({ id: d.id, ...d.data() })); _emitDataChanged(); },
-    (e) => console.error("[Reports] listener error:", e)
+    (e) => _reportListenerError("Reports", e)
   );
 
   // Managers + technicians only (customers are excluded from the staff roster)
@@ -179,7 +196,7 @@ function startOrgListeners(orgId) {
           .filter((u) => u.role === "manager" || u.role === "technician");
         _emitDataChanged();
       },
-      (e) => console.error("[Users] listener error:", e)
+      (e) => _reportListenerError("Technicians & Staff", e)
     );
 
   // Registered customer accounts — used so a manager can LINK a job to an
@@ -190,7 +207,7 @@ function startOrgListeners(orgId) {
     .where("organizationId", "==", orgId).where("role", "==", "customer")
     .onSnapshot(
       (snap) => { _customersCache = snap.docs.map((d) => ({ id: d.id, ...d.data() })); _emitDataChanged(); },
-      (e) => console.error("[Customers] listener error:", e)
+      (e) => _reportListenerError("Customers", e)
     );
 }
 
@@ -321,6 +338,10 @@ const Jobs = {
   },
   hasReport: (jobId) => _reportsCache.some((r) => r.jobId === jobId),
   reportFor: (jobId) => _reportsCache.find((r) => r.jobId === jobId) || null,
+  // Every completed job a customer has left a star rating on — this is the
+  // full org-wide feedback/review list a manager sees (the dashboard widget
+  // only shows the latest 4; #reviews shows all of them).
+  reviews: () => _jobsCache.filter((j) => j.rating).sort((a, b) => new Date(b.reviewedAt) - new Date(a.reviewedAt)),
 };
 
 /* ---------- Reports (Firestore-backed, org-scoped) ---------- */
@@ -433,6 +454,24 @@ const Auth = {
         createdAt: new Date().toISOString(),
       };
       await _writeProfile(firebaseUser.uid, profile);
+    } else if (profile.organizationId && profile.organizationId !== DEFAULT_ORG_ID) {
+      // Self-heal: this is a single-tenant deployment, so every account is
+      // meant to share DEFAULT_ORG_ID. Some accounts were written with a
+      // stale/mismatched organizationId before that was consistently
+      // enforced across the app — invisible at the time, but it silently
+      // hides that person's jobs from everyone else's org-scoped queries
+      // (their jobs "exist" but never show up on the manager dashboard,
+      // and vice versa). Correct it automatically on sign-in rather than
+      // requiring a one-off Admin SDK migration script run by hand.
+      // firestore.rules' isOrgSelfHeal() is what allows this specific,
+      // narrow correction (move to the one canonical org, nothing else).
+      try {
+        await _writeProfile(firebaseUser.uid, { organizationId: DEFAULT_ORG_ID });
+        profile = { ...profile, organizationId: DEFAULT_ORG_ID };
+        console.log("[Auth] Self-healed stale organizationId ->", DEFAULT_ORG_ID);
+      } catch (e) {
+        console.error("[Auth] organizationId self-heal failed:", e);
+      }
     }
 
     _currentProfile = {
@@ -537,6 +576,96 @@ const Auth = {
       revokedBy: _currentProfile ? _currentProfile.id : "unknown",
       revokedAt: new Date().toISOString(),
     }, { merge: true });
+  },
+
+  /**
+   * Manager-only: create a technician's Firebase Auth account AND their
+   * Firestore profile directly, with a password the MANAGER chooses (not
+   * a link the technician has to self-activate with). This is what makes
+   * "let the manager set the technician's password" actually possible on a
+   * pure client-side/serverless deployment with no Admin SDK backend:
+   *
+   *  1. Authorize the email in /tech_authorizations, same as before — this
+   *     stays the server-enforced gate (firestore.rules) that decides who
+   *     is even allowed to hold the "technician" role.
+   *  2. Create the Firebase Auth user + Firestore profile using an
+   *     isolated SECONDARY firebase app instance (see getSecondaryAuth in
+   *     firebase-client.js). createUserWithEmailAndPassword always signs
+   *     the new account into whichever `auth` you call it on — doing this
+   *     on the secondary app means the technician's brand-new account is
+   *     the one that's briefly "signed in" there, while the MANAGER's own
+   *     session on the primary app is completely undisturbed throughout.
+   *     The profile write happens through that same secondary Firestore
+   *     handle, so it's authenticated as the new technician themselves —
+   *     satisfying the ordinary isOwner(userId) create rule exactly as if
+   *     they'd registered themselves, just driven by the manager instead.
+   *  3. Immediately sign the secondary app back out. Its only job was to
+   *     exist just long enough to create that one account.
+   *
+   * The technician can sign in right away with the email + password the
+   * manager set. (They can change it themselves later from their own
+   * account if they want to.)
+   */
+  async managerCreateTechnician(email, password, techData = {}) {
+    const me = _currentProfile;
+    if (!me || me.role !== "manager") throw new Error("Only a manager can create a technician account.");
+    email = (email || "").trim().toLowerCase();
+    if (!email) throw new Error("Technician email is required.");
+    if (!password || password.length < 6) throw new Error("Password must be at least 6 characters.");
+
+    if (!window.PrimeFirebase || typeof window.PrimeFirebase.getSecondaryAuth !== "function") {
+      throw new Error("Firebase isn't ready yet — please try again in a moment.");
+    }
+    const secAuth = window.PrimeFirebase.getSecondaryAuth();
+    const secDb = window.PrimeFirebase.getSecondaryFirestore();
+    if (!secAuth || !secDb) throw new Error("Couldn't start account creation — Firebase isn't initialized.");
+
+    const orgId = me.organizationId || DEFAULT_ORG_ID;
+
+    // Step 1 — authorize the email first, so the profile-create rule
+    // (which checks tech_authorizations) is satisfied by the time we get to step 2.
+    await Auth.authorizeTechnician(orgId, email, {
+      firstName: techData.firstName || "", lastName: techData.lastName || "", employeeId: techData.employeeId || "",
+    });
+
+    // Step 2 — create the Auth account + Firestore profile via the secondary app.
+    let cred;
+    try {
+      cred = await secAuth.createUserWithEmailAndPassword(email, password);
+    } catch (err) {
+      // Don't leave a "ghost" authorization behind for an account that
+      // never actually got created.
+      await Auth.revokeTechnician(email).catch(() => {});
+      throw err;
+    }
+
+    try {
+      const displayName = `${techData.firstName || ""} ${techData.lastName || ""}`.trim();
+      if (displayName) await cred.user.updateProfile({ displayName });
+
+      const profile = {
+        uid: cred.user.uid,
+        email,
+        firstName: techData.firstName || "",
+        lastName: techData.lastName || "",
+        role: "technician",
+        organizationId: orgId,
+        orgName: me.orgName || "",
+        employeeId: techData.employeeId || "",
+        phone: techData.phone || "",
+        address: "",
+        status: "available",
+        active: true,
+        createdBy: me.id,
+        createdAt: new Date().toISOString(),
+      };
+      await secDb.collection("users").doc(cred.user.uid).set(profile, { merge: true });
+      return { id: cred.user.uid, ...profile };
+    } finally {
+      // Always sign the secondary session back out, success or failure —
+      // it must never linger as a second live session.
+      await secAuth.signOut().catch(() => {});
+    }
   },
 
   /** Check whether an email has been pre-authorized as a technician. */

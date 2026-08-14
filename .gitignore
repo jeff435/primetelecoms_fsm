@@ -8,6 +8,7 @@ package-lock.json
 .env.production
 
 # Firebase
+serviceAccountKey.json
 .firebase/
 firebase-debug.log
 firestore-debug.log

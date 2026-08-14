@@ -517,10 +517,18 @@ function renderActivateTechnician() {
         }
       }
 
-      // Step 3 — write Firestore profile with technician role
+      // Step 3 — write Firestore profile with technician role.
+      // organizationId is deliberately hard-pinned to DEFAULT_ORG_ID here,
+      // NOT inherited from authRecord.organizationId — the authorization
+      // record is written by a manager's own profile at authorization time
+      // (see Auth.authorizeTechnician / Users.changeRole in data.js) and if
+      // that manager's own profile ever carried a stale organizationId, this
+      // was a live path for that stale value to propagate into a brand-new
+      // technician account. Single-tenant deployment: every account shares
+      // DEFAULT_ORG_ID regardless of what the authorization record says.
       await Auth.loadProfile(fbUser, {
         role: "technician",
-        organizationId: authRecord.organizationId || DEFAULT_ORG_ID,
+        organizationId: DEFAULT_ORG_ID,
         authorizedBy: authRecord.authorizedBy || "",
       });
       if (authRecord.firstName || authRecord.lastName) {

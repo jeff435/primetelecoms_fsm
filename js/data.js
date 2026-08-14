@@ -83,12 +83,25 @@ function _startMyProfileListener(uid) {
       (doc) => {
         if (!doc.exists || !_currentProfile) return;
         const data = doc.data();
-        if (data.role !== _currentProfile.role || data.active !== _currentProfile.active) {
+        const orgChanged = data.organizationId !== _currentProfile.organizationId;
+        const roleOrActiveChanged = data.role !== _currentProfile.role || data.active !== _currentProfile.active;
+        if (orgChanged || roleOrActiveChanged) {
           _currentProfile = { ..._currentProfile, ...data };
+          if (orgChanged) {
+            // organizationId changed under this signed-in user — most
+            // commonly a server-side migration correcting a stale value
+            // via the Admin SDK (clients can never change this field
+            // themselves; see roleAndOrgUnchanged() in firestore.rules).
+            // The jobs/reports/users/customers listeners were opened with
+            // the OLD organizationId baked into their query, so they must
+            // be torn down and reopened against the new one — otherwise
+            // every one of them starts failing with permission-denied,
+            // because firestore.rules re-reads organizationId fresh on
+            // every check and it no longer matches the query's filter.
+            startOrgListeners(data.organizationId);
+          }
           // Role or active-flag changed under this user (e.g. a manager
-          // just promoted, demoted, or revoked them). organizationId is
-          // unchanged, so the existing jobs/reports/users/customers
-          // listeners stay valid as-is — just tell the router to
+          // just promoted, demoted, or revoked them) — tell the router to
           // re-evaluate route guards and re-render against the new role.
           _emitDataChanged();
         }

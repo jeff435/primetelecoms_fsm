@@ -204,7 +204,12 @@ function router() {
 
   renderShell(user);
   const content = document.getElementById("app-content");
-  setActiveNav(route);
+  
+  let navKey = route;
+  if (route === "admin" && parts[1]) {
+    navKey = `admin/${parts[1]}`;
+  }
+  setActiveNav(navKey);
 
   switch (route) {
     case "dashboard":
@@ -215,9 +220,20 @@ function router() {
       break;
 
     case "admin":
-      // Only the admin reaches here (guard above) — manager-approval
-      // decisions (approve/reject/revoke/reinstate).
-      renderAdminManagers(content, user);
+      // Only the admin reaches here (guard above)
+      if (parts[1] === "managers") {
+        renderAdminManagers(content, user);
+      } else if (parts[1] === "orgs") {
+        renderAdminOrgs(content, user);
+      } else if (parts[1] === "intel") {
+        renderAdminIntel(content, user);
+      } else if (parts[1] === "activity") {
+        renderAdminActivity(content, user);
+      } else if (parts[1] === "manager" && parts[2]) {
+        renderAdminManagerDetail(content, user, parts[2]);
+      } else {
+        renderAdminManagers(content, user);
+      }
       break;
 
     case "jobs":
@@ -882,60 +898,262 @@ function renderPendingApproval(user) {
    SUPREME ADMIN — Overview & Issues (the admin's #dashboard)
    ============================================================ */
 function renderAdminOverview(el, user) {
-  setPageTitle("Supreme Admin — Overview", "System-wide status and open issues");
+  setPageTitle("Supreme Admin Command Center", "Complete visibility and operational intelligence");
   const jobs = Jobs.all();
   const reports = Reports.all();
   const pendingManagers = Users.pendingManagers();
+  const activeManagers = Users.managers();
+  const technicians = Users.allTechniciansForAdmin();
+  const activeTechnicians = Users.technicians();
+
+  const ratedJobs = jobs.filter((j) => j.rating);
+  const avgRating = ratedJobs.length ? (ratedJobs.reduce((s, j) => s + j.rating, 0) / ratedJobs.length) : 0;
+
+  // Alerts
   const unassigned = jobs.filter((j) => j.status === "pending");
   const staleUnassigned = unassigned.filter((j) => (Date.now() - new Date(j.createdAt).getTime()) > 24 * 60 * 60 * 1000);
   const stuckInProgress = jobs.filter((j) => j.status === "in_progress" && j.startedAt && (Date.now() - new Date(j.startedAt).getTime()) > 3 * 24 * 60 * 60 * 1000);
   const reportsAwaitingReview = reports.filter((r) => r.status === "submitted");
   const lowReviews = Jobs.reviews().filter((j) => j.rating <= 2);
-  const ratedJobs = jobs.filter((j) => j.rating);
-  const avgRating = ratedJobs.length ? (ratedJobs.reduce((s, j) => s + j.rating, 0) / ratedJobs.length) : 0;
 
-  const issues = [];
-  if (pendingManagers.length) issues.push({ label: `${pendingManagers.length} manager request${pendingManagers.length > 1 ? "s" : ""} awaiting approval`, link: "#admin/managers", tone: "amber" });
-  if (staleUnassigned.length) issues.push({ label: `${staleUnassigned.length} job${staleUnassigned.length > 1 ? "s" : ""} unassigned for over 24 hours`, link: "#jobs", tone: "red" });
-  if (stuckInProgress.length) issues.push({ label: `${stuckInProgress.length} job${stuckInProgress.length > 1 ? "s" : ""} in progress for over 3 days`, link: "#jobs", tone: "amber" });
-  if (reportsAwaitingReview.length) issues.push({ label: `${reportsAwaitingReview.length} service report${reportsAwaitingReview.length > 1 ? "s" : ""} awaiting review`, link: "#reports", tone: "amber" });
-  if (lowReviews.length) issues.push({ label: `${lowReviews.length} low customer rating${lowReviews.length > 1 ? "s" : ""} (2★ or below)`, link: "#reviews", tone: "red" });
+  const alerts = [];
+  if (pendingManagers.length) {
+    alerts.push({
+      type: "critical",
+      icon: "🚨",
+      text: `${pendingManagers.length} manager registration request${pendingManagers.length > 1 ? "s" : ""} pending approval`,
+      link: "#admin/managers"
+    });
+  }
+  if (staleUnassigned.length) {
+    alerts.push({
+      type: "warning",
+      icon: "⏳",
+      text: `${staleUnassigned.length} job${staleUnassigned.length > 1 ? "s" : ""} unassigned for over 24 hours`,
+      link: "#jobs"
+    });
+  }
+  if (stuckInProgress.length) {
+    alerts.push({
+      type: "warning",
+      icon: "⚠️",
+      text: `${stuckInProgress.length} job${stuckInProgress.length > 1 ? "s" : ""} in-progress for over 3 days`,
+      link: "#jobs"
+    });
+  }
+  if (reportsAwaitingReview.length) {
+    alerts.push({
+      type: "info",
+      icon: "📝",
+      text: `${reportsAwaitingReview.length} service report${reportsAwaitingReview.length > 1 ? "s" : ""} awaiting manager review`,
+      link: "#reports"
+    });
+  }
+  if (lowReviews.length) {
+    alerts.push({
+      type: "critical",
+      icon: "👎",
+      text: `${lowReviews.length} customer complaint${lowReviews.length > 1 ? "s" : ""} (rating 2★ or below)`,
+      link: "#reviews"
+    });
+  }
+
+  // Managers aggregated view
+  const managersOverviewList = AdminStats.managerOverview();
+
+  // Techs list
+  const techPerformance = AdminStats.technicianPerformance();
+
+  // Activity Feed
+  const recentActivities = AdminStats.activityFeed(8);
 
   el.innerHTML = `
-    <div class="pt-grid-2-even" style="margin-bottom:18px;">
-      <div class="pt-stat-card"><div class="pt-stat-icon pt-icon-blue">&#128188;</div><div><div class="pt-stat-value">${jobs.length}</div><div class="pt-stat-label">Total Jobs</div></div></div>
-      <div class="pt-stat-card"><div class="pt-stat-icon pt-icon-amber">&#128101;</div><div><div class="pt-stat-value">${Users.technicians().length}</div><div class="pt-stat-label">Active Technicians</div></div></div>
-    </div>
-    <div class="pt-grid-2-even" style="margin-bottom:18px;">
-      <div class="pt-stat-card"><div class="pt-stat-icon pt-icon-green">&#128100;</div><div><div class="pt-stat-value">${Users.managers().length}</div><div class="pt-stat-label">Active Managers</div></div></div>
-      <div class="pt-stat-card"><div class="pt-stat-icon pt-icon-red">&#9888;</div><div><div class="pt-stat-value">${pendingManagers.length}</div><div class="pt-stat-label">Pending Manager Requests</div></div></div>
-    </div>
-    <div class="pt-grid-2-even" style="margin-bottom:18px;">
-      <div class="pt-stat-card"><div class="pt-stat-icon pt-icon-amber">&#9733;</div><div><div class="pt-stat-value">${avgRating ? avgRating.toFixed(1) : "—"}</div><div class="pt-stat-label">Avg. Customer Rating (${ratedJobs.length})</div></div></div>
-      <div class="pt-stat-card"><div class="pt-stat-icon pt-icon-blue">&#128100;</div><div><div class="pt-stat-value">${Users.customers().length}</div><div class="pt-stat-label">Customers</div></div></div>
+    <!-- KPI Command Row -->
+    <div class="pt-admin-kpi-row">
+      <div class="pt-admin-kpi-tile slate">
+        <span class="pt-admin-kpi-icon">🏢</span>
+        <div class="pt-admin-kpi-value">1</div>
+        <div class="pt-admin-kpi-label">Organizations</div>
+        <div class="pt-admin-kpi-sub">Prime Telecoms Ltd</div>
+      </div>
+      <div class="pt-admin-kpi-tile purple">
+        <span class="pt-admin-kpi-icon">🛡️</span>
+        <div class="pt-admin-kpi-value">${activeManagers.length}</div>
+        <div class="pt-admin-kpi-label">Managers</div>
+        <div class="pt-admin-kpi-sub">${pendingManagers.length} pending approval</div>
+      </div>
+      <div class="pt-admin-kpi-tile green">
+        <span class="pt-admin-kpi-icon">🔧</span>
+        <div class="pt-admin-kpi-value">${activeTechnicians.length}</div>
+        <div class="pt-admin-kpi-label">Technicians</div>
+        <div class="pt-admin-kpi-sub">${technicians.filter(t => t.active === false).length} inactive accounts</div>
+      </div>
+      <div class="pt-admin-kpi-tile">
+        <span class="pt-admin-kpi-icon">💼</span>
+        <div class="pt-admin-kpi-value">${jobs.length}</div>
+        <div class="pt-admin-kpi-label">Total Jobs</div>
+        <div class="pt-admin-kpi-sub">${jobs.filter(j => j.status === "completed").length} completed</div>
+      </div>
+      <div class="pt-admin-kpi-tile amber">
+        <span class="pt-admin-kpi-icon">⭐️</span>
+        <div class="pt-admin-kpi-value">${avgRating ? avgRating.toFixed(1) : "—"}</div>
+        <div class="pt-admin-kpi-label">Avg Rating</div>
+        <div class="pt-admin-kpi-sub">Across ${ratedJobs.length} reviews</div>
+      </div>
     </div>
 
-    <div class="pt-card" style="margin-bottom:16px;">
-      <div class="pt-card-title">Open Issues</div>
-      ${issues.length ? `
-        <div style="display:flex;flex-direction:column;gap:8px;">
-          ${issues.map((i) => `
-            <a href="${i.link}" style="display:flex;justify-content:space-between;align-items:center;padding:10px 14px;border-radius:10px;background:${i.tone === "red" ? "#FBE1E1" : "#fef3c7"};color:${i.tone === "red" ? "#D64545" : "#92400e"};text-decoration:none;font-size:13.5px;font-weight:600;">
-              <span>${i.label}</span><span>&#8594;</span>
-            </a>`).join("")}
+    <!-- Alert / System Event Feed -->
+    <div class="pt-card" style="margin-bottom: 20px;">
+      <div class="pt-card-title">System Activity Alerts</div>
+      ${alerts.length ? `
+        <div style="display: flex; flex-direction: column;">
+          ${alerts.map(a => `
+            <a href="${a.link}" class="pt-admin-alert ${a.type}">
+              <span class="pt-admin-alert-icon">${a.icon}</span>
+              <span class="pt-admin-alert-text">${a.text}</span>
+              <span class="pt-admin-alert-arrow">➔</span>
+            </a>
+          `).join("")}
         </div>
-      ` : `<div class="pt-empty-state"><i>&#9989;</i>No open issues — everything looks healthy.</div>`}
+      ` : `
+        <div class="pt-admin-alert success">
+          <span class="pt-admin-alert-icon">💚</span>
+          <span class="pt-admin-alert-text">All systems green. No pending registrations, stalled jobs, or low ratings found.</span>
+        </div>
+      `}
     </div>
 
-    <div class="pt-card">
-      <div class="pt-card-title">Quick Links</div>
-      <div style="display:flex;flex-wrap:wrap;gap:10px;">
-        <a href="#admin/managers" class="btn btn-pt-primary btn-sm">Manager Approvals</a>
-        <a href="#staff" class="btn btn-pt-outline btn-sm">Technicians</a>
-        <a href="#customers" class="btn btn-pt-outline btn-sm">Customers</a>
-        <a href="#jobs" class="btn btn-pt-outline btn-sm">All Jobs</a>
-        <a href="#reports" class="btn btn-pt-outline btn-sm">Service Reports</a>
-        <a href="#reviews" class="btn btn-pt-outline btn-sm">Customer Reviews</a>
+    <!-- Manager Control Center Grid -->
+    <div class="pt-admin-section-head">
+      <h3><span>🏢</span> Managers &amp; Organizations</h3>
+      <a href="#admin/managers" class="btn btn-pt-outline btn-sm">Manage Accounts</a>
+    </div>
+    
+    <div class="pt-admin-mgr-grid" style="margin-bottom: 20px;">
+      ${managersOverviewList.length ? managersOverviewList.map(m => {
+        const isSuspended = m.active === false;
+        const badgeClass = isSuspended ? 'pt-mgr-badge-suspended' : 'pt-mgr-badge-active';
+        const badgeLabel = isSuspended ? 'Suspended' : 'Active';
+        return `
+          <div class="pt-admin-mgr-card">
+            <div class="pt-admin-mgr-card-header">
+              <div class="pt-admin-mgr-avatar">${escapeHtml(m.firstName[0])}</div>
+              <div>
+                <div class="pt-admin-mgr-name">${escapeHtml(Users.fullName(m))}</div>
+                <div class="pt-admin-mgr-email">${escapeHtml(m.email || m.username)}</div>
+                <div class="pt-admin-mgr-org">${escapeHtml(m.orgName || "Prime Telecoms Limited")}</div>
+              </div>
+              <div style="margin-left: auto;">
+                <span class="${badgeClass}">${badgeLabel}</span>
+              </div>
+            </div>
+            <div class="pt-admin-mgr-stats">
+              <div class="pt-admin-mgr-stat">
+                <div class="pt-admin-mgr-stat-val">${m.techCount}</div>
+                <div class="pt-admin-mgr-stat-lbl">Techs</div>
+              </div>
+              <div class="pt-admin-mgr-stat">
+                <div class="pt-admin-mgr-stat-val">${m.totalJobs}</div>
+                <div class="pt-admin-mgr-stat-lbl">Jobs</div>
+              </div>
+              <div class="pt-admin-mgr-stat">
+                <div class="pt-admin-mgr-stat-val">${m.avgRating ? m.avgRating.toFixed(1) : "—"}★</div>
+                <div class="pt-admin-mgr-stat-lbl">Rating</div>
+              </div>
+            </div>
+            <div class="pt-admin-mgr-actions">
+              <a href="#admin/manager/${m.id}" class="btn btn-pt-primary btn-sm btn-block" style="text-align: center; justify-content: center;">Drill Down Dashboard</a>
+            </div>
+          </div>
+        `;
+      }).join("") : `
+        <div class="pt-empty-state" style="grid-column: 1/-1;">
+          <i>👤</i>No managers approved yet.
+        </div>
+      `}
+    </div>
+
+    <!-- Techs Board & Activity Feed -->
+    <div class="pt-grid-2">
+      <!-- Technician Status Board -->
+      <div class="pt-card">
+        <div class="pt-card-title">Technician Status Board</div>
+        ${techPerformance.length ? `
+          <div class="pt-table-wrap">
+            <table class="pt-table">
+              <thead>
+                <tr>
+                  <th>Technician</th>
+                  <th>Status</th>
+                  <th>Active Jobs</th>
+                  <th>Completion</th>
+                  <th>Avg Rating</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${techPerformance.map(t => {
+                  const status = AdminStats.technicianStatus(t.id);
+                  let statusClass = "pt-status-offline";
+                  let statusLbl = "Offline";
+                  if (status === "on-duty") { statusClass = "pt-status-on-duty"; statusLbl = "On Duty"; }
+                  else if (status === "available") { statusClass = "pt-status-available"; statusLbl = "Available"; }
+                  else if (status === "on-break") { statusClass = "pt-status-on-break"; statusLbl = "On Break"; }
+                  else if (status === "inactive") { statusClass = "pt-status-inactive"; statusLbl = "Inactive"; }
+                  
+                  return `
+                    <tr>
+                      <td>
+                        <strong>${escapeHtml(Users.fullName(t))}</strong><br>
+                        <span class="text-muted" style="font-size: 11px;">${escapeHtml(t.employeeId || "No ID")}</span>
+                      </td>
+                      <td>
+                        <span class="pt-status-badge ${statusClass}">${statusLbl}</span>
+                      </td>
+                      <td><strong>${t.activeJobs}</strong></td>
+                      <td>
+                        <div style="font-size: 12px; font-weight: 600;">${t.compRate}%</div>
+                        <div class="pt-admin-progress-bar" style="width: 60px;">
+                          <div class="pt-admin-progress-fill" style="width: ${t.compRate}%;"></div>
+                        </div>
+                      </td>
+                      <td>${t.avgRating ? `${t.avgRating.toFixed(1)}★` : "—"}</td>
+                    </tr>
+                  `;
+                }).join("")}
+              </tbody>
+            </table>
+          </div>
+        ` : `
+          <div class="pt-empty-state">
+            <i>🔧</i>No technicians authorized.
+          </div>
+        `}
+      </div>
+
+      <!-- Recent System Activity Log -->
+      <div class="pt-card">
+        <div class="pt-card-title">
+          <span>Activity Stream</span>
+          <a href="#admin/activity" class="btn btn-pt-outline btn-sm">Full Log</a>
+        </div>
+        ${recentActivities.length ? `
+          <div class="pt-activity-feed">
+            ${recentActivities.map(a => `
+              <div class="pt-activity-item">
+                <div class="pt-activity-dot ${a.color}">${a.icon}</div>
+                <div class="pt-activity-body">
+                  <div class="pt-activity-title">${a.title}</div>
+                  <div class="pt-activity-meta">${a.meta}</div>
+                  <div class="pt-activity-time">${timeAgo(a.ts)}</div>
+                </div>
+              </div>
+            `).join("")}
+          </div>
+        ` : `
+          <div class="pt-empty-state">
+            <i>📋</i>No activity logged yet.
+          </div>
+        `}
       </div>
     </div>
   `;
@@ -945,10 +1163,21 @@ function renderAdminOverview(el, user) {
    SUPREME ADMIN — Manager Approvals (#admin/managers)
    ============================================================ */
 function renderAdminManagers(el, user) {
-  setPageTitle("Manager Approvals", "Add managers directly, or approve/reject/revoke self-registered requests");
+  setPageTitle("Manager Control Center", "Add managers, approve requests, and manage access");
   const pending = Users.pendingManagers();
   const active = Users.managers();
   const rejected = Users.rejectedManagers();
+
+  const allTechs = Users.allTechniciansForAdmin();
+  const jobs = Jobs.all();
+  const reviews = Jobs.reviews();
+
+  function getStatsForManager(m) {
+    const techCount = allTechs.length; // single-tenant pool
+    const mgrJobs = jobs; // single-tenant
+    const avgRating = reviews.length ? (reviews.reduce((s, j) => s + j.rating, 0) / reviews.length) : 0;
+    return { techCount, jobCount: mgrJobs.length, avgRating };
+  }
 
   el.innerHTML = `
     <div class="pt-card" style="max-width:600px;margin-bottom:20px;">
@@ -994,34 +1223,45 @@ function renderAdminManagers(el, user) {
     <div class="pt-card" style="margin-bottom:20px;">
       <div class="pt-card-title">Active Managers (${active.length})</div>
       ${active.length ? `
-      <div class="pt-table-wrap"><table class="pt-table"><thead><tr><th>Name</th><th>Email</th><th>Organization</th><th>Approved</th><th></th></tr></thead><tbody>
-        ${active.map((m) => `
+      <div class="pt-table-wrap"><table class="pt-table"><thead><tr><th>Name</th><th>Email</th><th>Organization</th><th>Techs</th><th>Jobs</th><th>Avg Rating</th><th></th></tr></thead><tbody>
+        ${active.map((m) => {
+          const stats = getStatsForManager(m);
+          return `
           <tr>
             <td><strong>${escapeHtml(Users.fullName(m))}</strong></td>
             <td>${escapeHtml(m.username || m.email)}</td>
             <td>${escapeHtml(m.orgName) || "—"}</td>
-            <td>${m.approvedAt ? fmtDate(m.approvedAt) : "—"}</td>
+            <td><strong>${stats.techCount}</strong></td>
+            <td><strong>${stats.jobCount}</strong></td>
+            <td>${stats.avgRating ? `${stats.avgRating.toFixed(1)}★` : "—"}</td>
             <td style="text-align:right;white-space:nowrap;">
-              <button class="btn btn-pt-outline btn-sm" data-show-pw="${m.id}">Show Password</button>
-              <button class="btn btn-pt-outline btn-sm" data-reset-pw="${escapeHtml(m.email || m.username)}">Send Reset Email</button>
-              <button class="btn btn-danger-outline btn-sm" data-revoke-mgr="${m.id}">Revoke Access</button>
+              <a href="#admin/manager/${m.id}" class="btn btn-pt-primary btn-sm">Drill Down</a>
+              <button class="btn btn-pt-outline btn-sm" data-show-pw="${m.id}">Show PW</button>
+              <button class="btn btn-pt-outline btn-sm" data-reset-pw="${escapeHtml(m.email || m.username)}">Reset Email</button>
+              <button class="btn btn-pt-outline btn-sm" data-suspend-mgr="${m.id}">Suspend</button>
+              <button class="btn btn-danger-outline btn-sm" data-revoke-mgr="${m.id}">Revoke</button>
             </td>
-          </tr>`).join("")}
+          </tr>`;
+        }).join("")}
       </tbody></table></div>` : `<div class="pt-empty-state"><i>&#128100;</i>No active managers yet.</div>`}
     </div>
 
     <div class="pt-card">
-      <div class="pt-card-title">Rejected / Revoked (${rejected.length})</div>
+      <div class="pt-card-title">Suspended / Rejected / Revoked (${rejected.length})</div>
       ${rejected.length ? `
-      <div class="pt-table-wrap"><table class="pt-table"><thead><tr><th>Name</th><th>Email</th><th>Status</th><th></th></tr></thead><tbody>
+      <div class="pt-table-wrap"><table class="pt-table"><thead><tr><th>Name</th><th>Email</th><th>Organization</th><th>Status</th><th></th></tr></thead><tbody>
         ${rejected.map((m) => `
           <tr>
             <td><strong>${escapeHtml(Users.fullName(m))}</strong></td>
             <td>${escapeHtml(m.username || m.email)}</td>
-            <td>${m.role === "manager_pending" ? "Rejected" : "Revoked"}</td>
-            <td style="text-align:right;"><button class="btn btn-pt-outline btn-sm" data-reinstate="${m.id}">Reinstate</button></td>
+            <td>${escapeHtml(m.orgName) || "—"}</td>
+            <td>
+              ${m.suspendedAt ? '<span class="pt-mgr-badge-suspended">Suspended</span>' : 
+                (m.role === "manager_pending" ? '<span class="pt-mgr-badge-pending">Rejected Request</span>' : '<span class="pt-mgr-badge-revoked">Revoked Access</span>')}
+            </td>
+            <td style="text-align:right;"><button class="btn btn-pt-outline btn-sm" data-reinstate="${m.id}">Activate &amp; Reinstate</button></td>
           </tr>`).join("")}
-      </tbody></table></div>` : `<div class="pt-empty-state"><i>&#128100;</i>Nobody has been rejected or revoked.</div>`}
+      </tbody></table></div>` : `<div class="pt-empty-state"><i>&#128100;</i>Nobody has been rejected, suspended, or revoked.</div>`}
     </div>
   `;
 
@@ -1059,6 +1299,19 @@ function renderAdminManagers(el, user) {
         toast("Manager access revoked.", "success");
       } catch (err) {
         toast(err.message || "Failed to revoke.", "error");
+        btn.disabled = false;
+      }
+    });
+  });
+  el.querySelectorAll("[data-suspend-mgr]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      if (!confirm("Suspend this manager? Operations under their supervision will be paused.")) return;
+      btn.disabled = true;
+      try {
+        await Users.setManagerStatus(btn.getAttribute("data-suspend-mgr"), "suspend");
+        toast("Manager suspended.", "success");
+      } catch (err) {
+        toast(err.message || "Failed to suspend manager.", "error");
         btn.disabled = false;
       }
     });
@@ -1175,9 +1428,12 @@ function renderShell(user) {
   const pendingBadge = pendingCount ? ` <span class="pt-badge badge-status-cancelled" style="margin-left:4px;">${pendingCount}</span>` : "";
 
   const mainNav = isAdmin ? `
-          <a href="#dashboard" class="pt-nav-link" data-nav="dashboard"><i>&#9635;</i> Overview &amp; Issues</a>
-          <a href="#admin/managers" class="pt-nav-link" data-nav="admin"><i>&#128737;</i> Manager Approvals${pendingBadge}</a>
-          <div class="pt-nav-section-label">Operations</div>
+          <a href="#dashboard" class="pt-nav-link" data-nav="dashboard"><i>&#9635;</i> Command Center</a>
+          <a href="#admin/managers" class="pt-nav-link" data-nav="admin/managers"><i>&#128737;</i> Manager Control${pendingBadge}</a>
+          <a href="#admin/orgs" class="pt-nav-link" data-nav="admin/orgs"><i>&#127985;</i> Organizations</a>
+          <a href="#admin/intel" class="pt-nav-link" data-nav="admin/intel"><i>&#128202;</i> System Intelligence</a>
+          <a href="#admin/activity" class="pt-nav-link" data-nav="admin/activity"><i>&#128195;</i> Activity Log</a>
+          <div class="pt-nav-section-label">Operations View</div>
           <a href="#jobs" class="pt-nav-link" data-nav="jobs"><i>&#128188;</i> Jobs</a>
           <a href="#reports" class="pt-nav-link" data-nav="reports"><i>&#128196;</i> Service Reports</a>
           <a href="#staff" class="pt-nav-link" data-nav="staff"><i>&#128101;</i> Technicians</a>
@@ -2502,4 +2758,516 @@ function renderProfile(el, user) {
     toast("Profile updated successfully.", "success");
     router();
   });
+}
+
+/* ============================================================
+   SUPREME ADMIN — Manager Detail Drill-Down (#admin/manager/:id)
+   ============================================================ */
+function renderAdminManagerDetail(el, user, managerId) {
+  const manager = Users.get(managerId);
+  if (!manager) {
+    el.innerHTML = `<div class="pt-empty-state"><i>👤</i>Manager not found.</div>`;
+    return;
+  }
+
+  setPageTitle(`Manager Detail — ${Users.fullName(manager)}`, "Operational drill-down and performance analysis");
+
+  const jobs = Jobs.all();
+  const allTechs = Users.allTechniciansForAdmin();
+  const reviews = Jobs.reviews();
+
+  // Performance calculations
+  const mgrJobs = jobs; // single-tenant
+  const completed = mgrJobs.filter((j) => j.status === "completed");
+  const inProgress = mgrJobs.filter((j) => j.status === "in_progress");
+  const pending = mgrJobs.filter((j) => j.status === "pending");
+  const assigned = mgrJobs.filter((j) => j.status === "assigned");
+  const completionRate = mgrJobs.length ? Math.round((completed.length / mgrJobs.length) * 100) : 0;
+  
+  const mgrReviews = reviews;
+  const avgRating = mgrReviews.length ? (mgrReviews.reduce((s, j) => s + j.rating, 0) / mgrReviews.length) : 0;
+
+  // Render HTML
+  el.innerHTML = `
+    <button class="pt-admin-back" id="btn-back-mgrs">← Back to Command Center</button>
+
+    <div class="pt-grid-2">
+      <!-- Left Column: Manager Profile & Team Roster -->
+      <div>
+        <!-- Profile Card -->
+        <div class="pt-card" style="margin-bottom: 20px;">
+          <div class="pt-card-title">Manager Profile</div>
+          <div style="display: flex; gap: 16px; align-items: center; margin-bottom: 16px;">
+            <div class="pt-admin-mgr-avatar" style="width: 56px; height: 56px; font-size: 20px;">${escapeHtml(manager.firstName[0])}</div>
+            <div>
+              <h4 style="margin: 0; font-size: 17px; font-weight: 800; color: var(--pt-navy);">${escapeHtml(Users.fullName(manager))}</h4>
+              <div class="text-muted" style="font-size: 13px;">${escapeHtml(manager.email || manager.username)}</div>
+              <div style="font-weight: 700; color: var(--pt-blue); font-size: 12px; margin-top: 3px;">${escapeHtml(manager.orgName || "Prime Telecoms Limited")}</div>
+            </div>
+          </div>
+
+          <div style="padding: 12px 14px; background: var(--pt-bg); border-radius: 10px; font-size: 13px; margin-bottom: 16px;">
+            <div style="display: flex; justify-content: space-between; margin-bottom: 6px;">
+              <span class="text-muted">Account Status:</span>
+              <strong>
+                ${manager.active !== false ? '<span class="pt-mgr-badge-active">Active</span>' : 
+                  (manager.role === "manager_pending" ? '<span class="pt-mgr-badge-pending">Pending Approval</span>' : '<span class="pt-mgr-badge-suspended">Suspended</span>')}
+              </strong>
+            </div>
+            <div style="display: flex; justify-content: space-between; margin-bottom: 6px;">
+              <span class="text-muted">Registered On:</span>
+              <span>${fmtDate(manager.createdAt)}</span>
+            </div>
+            ${manager.approvedAt ? `
+              <div style="display: flex; justify-content: space-between;">
+                <span class="text-muted">Approved On:</span>
+                <span>${fmtDate(manager.approvedAt)}</span>
+              </div>
+            ` : ""}
+          </div>
+
+          <div class="pt-card-title" style="font-size: 13px; text-transform: uppercase; margin-bottom: 8px;">Access Control</div>
+          <div class="pt-admin-mgr-actions" style="display: flex; gap: 8px;">
+            ${manager.role === "manager_pending" && manager.active !== false ? `
+              <button class="btn btn-pt-primary btn-sm" id="detail-approve">Approve</button>
+              <button class="btn btn-danger-outline btn-sm" id="detail-reject">Reject</button>
+            ` : manager.active !== false ? `
+              <button class="btn btn-pt-outline btn-sm" id="detail-suspend">Suspend</button>
+              <button class="btn btn-danger-outline btn-sm" id="detail-revoke">Revoke</button>
+            ` : `
+              <button class="btn btn-pt-primary btn-sm" id="detail-reinstate">Activate / Reinstate</button>
+            `}
+          </div>
+        </div>
+
+        <!-- Team Roster -->
+        <div class="pt-card">
+          <div class="pt-card-title">Technicians Team (${allTechs.length})</div>
+          ${allTechs.length ? `
+            <div class="pt-table-wrap">
+              <table class="pt-table">
+                <thead>
+                  <tr>
+                    <th>Technician</th>
+                    <th>Status</th>
+                    <th>Active Jobs</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${allTechs.map(t => {
+                    const status = AdminStats.technicianStatus(t.id);
+                    let statusClass = "pt-status-offline";
+                    let statusLbl = "Offline";
+                    if (status === "on-duty") { statusClass = "pt-status-on-duty"; statusLbl = "On Duty"; }
+                    else if (status === "available") { statusClass = "pt-status-available"; statusLbl = "Available"; }
+                    else if (status === "on-break") { statusClass = "pt-status-on-break"; statusLbl = "On Break"; }
+                    else if (status === "inactive") { statusClass = "pt-status-inactive"; statusLbl = "Inactive"; }
+                    
+                    return `
+                      <tr>
+                        <td>
+                          <strong>${escapeHtml(Users.fullName(t))}</strong><br>
+                          <span class="text-muted" style="font-size: 11px;">${escapeHtml(t.email || t.username)}</span>
+                        </td>
+                        <td>
+                          <span class="pt-status-badge ${statusClass}">${statusLbl}</span>
+                        </td>
+                        <td><strong>${t.activeJobs || 0}</strong></td>
+                      </tr>
+                    `;
+                  }).join("")}
+                </tbody>
+              </table>
+            </div>
+          ` : `
+            <div class="pt-empty-state">No technicians assigned to this manager's team.</div>
+          `}
+        </div>
+      </div>
+
+      <!-- Right Column: Performance & Job Pipeline -->
+      <div>
+        <!-- Performance Indicators -->
+        <div class="pt-card" style="margin-bottom: 20px;">
+          <div class="pt-card-title">Performance Metrics</div>
+          <div class="pt-admin-kpi-row" style="grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 0;">
+            <div class="pt-admin-kpi-tile slate" style="padding: 14px;">
+              <span style="font-size: 20px;">📈</span>
+              <div class="pt-admin-kpi-value" style="font-size: 24px;">${completionRate}%</div>
+              <div class="pt-admin-kpi-label" style="font-size: 10px;">Completion Rate</div>
+              <div class="pt-admin-progress-bar" style="margin-top: 8px;">
+                <div class="pt-admin-progress-fill" style="width: ${completionRate}%;"></div>
+              </div>
+            </div>
+            <div class="pt-admin-kpi-tile amber" style="padding: 14px;">
+              <span style="font-size: 20px;">⭐️</span>
+              <div class="pt-admin-kpi-value" style="font-size: 24px;">${avgRating ? avgRating.toFixed(1) : "—"}</div>
+              <div class="pt-admin-kpi-label" style="font-size: 10px;">Average Rating</div>
+              <div style="font-size: 10px; color: rgba(255,255,255,0.7); margin-top: 8px;">From ${mgrReviews.length} reviews</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Job Pipeline -->
+        <div class="pt-card" style="margin-bottom: 20px;">
+          <div class="pt-card-title">Job Pipeline Status</div>
+          <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 14px;">
+            <div style="background: var(--pt-bg); padding: 10px; border-radius: 8px; text-align: center;">
+              <div style="font-size: 18px; font-weight: 800; color: var(--pt-navy);">${pending.length}</div>
+              <div class="text-muted" style="font-size: 11px;">Pending</div>
+            </div>
+            <div style="background: var(--pt-bg); padding: 10px; border-radius: 8px; text-align: center;">
+              <div style="font-size: 18px; font-weight: 800; color: var(--pt-navy);">${assigned.length}</div>
+              <div class="text-muted" style="font-size: 11px;">Assigned</div>
+            </div>
+            <div style="background: var(--pt-bg); padding: 10px; border-radius: 8px; text-align: center;">
+              <div style="font-size: 18px; font-weight: 800; color: var(--pt-navy);">${inProgress.length}</div>
+              <div class="text-muted" style="font-size: 11px;">In Progress</div>
+            </div>
+            <div style="background: var(--pt-bg); padding: 10px; border-radius: 8px; text-align: center;">
+              <div style="font-size: 18px; font-weight: 800; color: var(--pt-navy);">${completed.length}</div>
+              <div class="text-muted" style="font-size: 11px;">Completed</div>
+            </div>
+          </div>
+
+          <div class="pt-card-title" style="font-size: 13px; text-transform: uppercase; margin-bottom: 8px;">Recent Pipeline Jobs</div>
+          ${mgrJobs.length ? `
+            <div class="pt-table-wrap">
+              <table class="pt-table">
+                <thead>
+                  <tr>
+                    <th>Job</th>
+                    <th>Customer</th>
+                    <th>Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${mgrJobs.slice(0, 5).map(j => `
+                    <tr data-goto="#jobs/${j.id}">
+                      <td>
+                        <strong>${j.jobNumber}</strong><br>
+                        <span class="text-muted" style="font-size: 11px;">${escapeHtml(j.title)}</span>
+                      </td>
+                      <td>${escapeHtml(j.customerName)}</td>
+                      <td>${jobStatusBadge(j.status)}</td>
+                    </tr>
+                  `).join("")}
+                </tbody>
+              </table>
+            </div>
+          ` : `
+            <div class="pt-empty-state">No jobs processed yet.</div>
+          `}
+        </div>
+
+        <!-- Reviews / Customer Feedback -->
+        <div class="pt-card">
+          <div class="pt-card-title">Customer Feedback Ledger</div>
+          ${mgrReviews.length ? `
+            <div style="display: flex; flex-direction: column; gap: 10px;">
+              ${mgrReviews.slice(0, 4).map(r => `
+                <div style="border-bottom: 1px solid var(--pt-border); padding-bottom: 8px;">
+                  <div style="display: flex; justify-content: space-between; align-items: center;">
+                    <span style="font-size: 13px; font-weight: 700;">${escapeHtml(r.customerName)}</span>
+                    <span>${starRating(r.rating)}</span>
+                  </div>
+                  <div style="font-size: 12px; color: var(--pt-text-muted); margin-top: 3px;">
+                    ${r.reviewComment ? `"${escapeHtml(r.reviewComment)}"` : "No comment left."}
+                  </div>
+                  <div style="font-size: 10px; color: var(--pt-text-muted); margin-top: 4px; text-align: right;">${fmtDate(r.reviewedAt)}</div>
+                </div>
+              `).join("")}
+            </div>
+          ` : `
+            <div class="pt-empty-state">No reviews recorded yet.</div>
+          `}
+        </div>
+      </div>
+    </div>
+  `;
+
+  // Register Back Action
+  document.getElementById("btn-back-mgrs").addEventListener("click", () => {
+    navigate("dashboard");
+    router();
+  });
+
+  // Action listeners inside Detail
+  const setupBtn = (id, action, label) => {
+    const btn = document.getElementById(id);
+    if (btn) {
+      btn.addEventListener("click", async () => {
+        if (action !== "approve" && action !== "reinstate" && !confirm(`Are you sure you want to ${action} this manager account?`)) return;
+        btn.disabled = true;
+        try {
+          await Users.setManagerStatus(manager.id, action);
+          toast(`Manager account ${label} successfully.`, "success");
+          router();
+        } catch (err) {
+          toast(err.message || "Operation failed", "error");
+          btn.disabled = false;
+        }
+      });
+    }
+  };
+
+  setupBtn("detail-approve", "approve", "approved");
+  setupBtn("detail-reject", "reject", "rejected");
+  setupBtn("detail-suspend", "suspend", "suspended");
+  setupBtn("detail-revoke", "revoke", "revoked");
+  setupBtn("detail-reinstate", "reinstate", "reinstated");
+
+  attachRowNav(el);
+}
+
+/* ============================================================
+   SUPREME ADMIN — Organizations Management (#admin/orgs)
+   ============================================================ */
+function renderAdminOrgs(el, user) {
+  setPageTitle("Organization Registry", "Platform companies and tenant spaces");
+
+  const activeManagers = Users.managers();
+  const pendingManagers = Users.pendingManagers();
+  const technicians = Users.allTechniciansForAdmin();
+  const jobs = Jobs.all();
+  const ratedJobs = jobs.filter((j) => j.rating);
+  const avgRating = ratedJobs.length ? (ratedJobs.reduce((s, j) => s + j.rating, 0) / ratedJobs.length) : 0;
+
+  el.innerHTML = `
+    <div class="pt-admin-banner">
+      <div>
+        <div class="pt-admin-banner-title">Organizations Registry</div>
+        <div class="pt-admin-banner-sub">Currently running in single-tenant deployment mode. High scalability architecture ready for multi-tenant mapping.</div>
+      </div>
+    </div>
+
+    <div class="pt-grid-2" style="grid-template-columns: 1.5fr 1fr;">
+      <!-- Registry List -->
+      <div class="pt-card">
+        <div class="pt-card-title">Registered Tenants (1)</div>
+        <div class="pt-admin-org-card">
+          <div class="pt-admin-org-header">
+            <div class="pt-admin-org-icon">🏢</div>
+            <div>
+              <div class="pt-admin-org-name">Prime Telecoms Limited</div>
+              <div class="pt-admin-org-id">Tenant Key: org_primetelecoms</div>
+            </div>
+            <div style="margin-left: auto;">
+              <span class="pt-status-badge pt-status-on-duty">Core Space</span>
+            </div>
+          </div>
+
+          <div class="pt-admin-org-stats">
+            <div class="pt-admin-org-stat">
+              <div class="pt-admin-org-stat-val">${activeManagers.length + pendingManagers.length}</div>
+              <div class="pt-admin-org-stat-lbl">Managers</div>
+            </div>
+            <div class="pt-admin-org-stat">
+              <div class="pt-admin-org-stat-val">${technicians.length}</div>
+              <div class="pt-admin-org-stat-lbl">Techs</div>
+            </div>
+            <div class="pt-admin-org-stat">
+              <div class="pt-admin-org-stat-val">${jobs.length}</div>
+              <div class="pt-admin-org-stat-lbl">Total Jobs</div>
+            </div>
+            <div class="pt-admin-org-stat">
+              <div class="pt-admin-org-stat-val">${avgRating ? avgRating.toFixed(1) : "—"}★</div>
+              <div class="pt-admin-org-stat-lbl">Rating</div>
+            </div>
+          </div>
+
+          <div style="display: flex; gap: 8px;">
+            <a href="#admin/managers" class="btn btn-pt-primary btn-sm">Managers Directory</a>
+            <a href="#staff" class="btn btn-pt-outline btn-sm">Technicians Roster</a>
+          </div>
+        </div>
+      </div>
+
+      <!-- Add Tenant Info (Command Info Desk) -->
+      <div class="pt-card">
+        <div class="pt-card-title">Tenant Operations Desk</div>
+        <div style="line-height: 1.6; font-size: 13.5px;">
+          <p>This deployment is scoped to <strong>Prime Telecoms Limited</strong> (<code>org_primetelecoms</code>) serving as the main corporate domain.</p>
+          <p style="margin-top: 12px;"><strong>Hierarchy Chain:</strong><br>
+          <span style="color: var(--pt-blue-light); font-weight: bold;">SUPER ADMIN</span> authorizes and audits <span style="color: var(--pt-blue); font-weight: bold;">MANAGERS</span>.<br>
+          <span style="color: var(--pt-blue); font-weight: bold;">MANAGERS</span> authorize and dispatch <span style="color: var(--pt-warning); font-weight: bold;">TECHNICIANS</span>.<br>
+          <span style="color: var(--pt-warning); font-weight: bold;">TECHNICIANS</span> execute jobs on-site for customer assets.</p>
+          <p style="margin-top: 12px; background: var(--pt-bg); padding: 12px; border-radius: 8px; border-left: 3px solid var(--pt-amber);">
+            <strong>Need to setup a new company?</strong> Contact Prime Telecoms devops center to spin up new database instances for multiple client scopes.
+          </p>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+/* ============================================================
+   SUPREME ADMIN — System Intelligence (#admin/intel)
+   ============================================================ */
+function renderAdminIntel(el, user) {
+  setPageTitle("System Intelligence & Performance", "Core analytics and top ranking lists");
+
+  const jobs = Jobs.all();
+  const reports = Reports.all();
+  const reviews = Jobs.reviews();
+
+  // Ratings calculation
+  const totalReviews = reviews.length;
+  const ratingCounts = { 5: 0, 4: 0, 3: 0, 2: 0, 1: 0 };
+  reviews.forEach(r => { if (ratingCounts[r.rating] !== undefined) ratingCounts[r.rating]++; });
+
+  // Tech rankings
+  const techRankings = AdminStats.technicianPerformance();
+
+  // Stalled jobs
+  const unassigned = jobs.filter((j) => j.status === "pending");
+  const staleUnassigned = unassigned.filter((j) => (Date.now() - new Date(j.createdAt).getTime()) > 24 * 60 * 60 * 1000);
+  const stuckInProgress = jobs.filter((j) => j.status === "in_progress" && j.startedAt && (Date.now() - new Date(j.startedAt).getTime()) > 3 * 24 * 60 * 60 * 1000);
+
+  // Status breakdown
+  const pendingJ = jobs.filter(j => j.status === "pending").length;
+  const assignedJ = jobs.filter(j => j.status === "assigned").length;
+  const progressJ = jobs.filter(j => j.status === "in_progress").length;
+  const completedJ = jobs.filter(j => j.status === "completed").length;
+
+  el.innerHTML = `
+    <!-- Top KPI Grid -->
+    <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 20px;">
+      <div style="background: #fff; border: 1px solid var(--pt-border); border-radius: 12px; padding: 16px; box-shadow: var(--pt-shadow);">
+        <div style="font-size: 11px; text-transform: uppercase; color: var(--pt-text-muted); font-weight: 700;">Job Queue Status</div>
+        <div style="font-size: 26px; font-weight: 800; color: var(--pt-navy); margin-top: 4px;">${pendingJ}</div>
+        <div style="font-size: 11px; color: var(--pt-amber-dark); margin-top: 4px; font-weight: 600;">Unassigned Pipeline</div>
+      </div>
+      <div style="background: #fff; border: 1px solid var(--pt-border); border-radius: 12px; padding: 16px; box-shadow: var(--pt-shadow);">
+        <div style="font-size: 11px; text-transform: uppercase; color: var(--pt-text-muted); font-weight: 700;">Dispatched active</div>
+        <div style="font-size: 26px; font-weight: 800; color: var(--pt-navy); margin-top: 4px;">${assignedJ + progressJ}</div>
+        <div style="font-size: 11px; color: var(--pt-blue); margin-top: 4px; font-weight: 600;">Currently In Action</div>
+      </div>
+      <div style="background: #fff; border: 1px solid var(--pt-border); border-radius: 12px; padding: 16px; box-shadow: var(--pt-shadow);">
+        <div style="font-size: 11px; text-transform: uppercase; color: var(--pt-text-muted); font-weight: 700;">Completed Operations</div>
+        <div style="font-size: 26px; font-weight: 800; color: var(--pt-navy); margin-top: 4px;">${completedJ}</div>
+        <div style="font-size: 11px; color: var(--pt-success); margin-top: 4px; font-weight: 600;">Report Filed &amp; Closed</div>
+      </div>
+      <div style="background: #fff; border: 1px solid var(--pt-border); border-radius: 12px; padding: 16px; box-shadow: var(--pt-shadow);">
+        <div style="font-size: 11px; text-transform: uppercase; color: var(--pt-text-muted); font-weight: 700;">Total Filed Reports</div>
+        <div style="font-size: 26px; font-weight: 800; color: var(--pt-navy); margin-top: 4px;">${reports.length}</div>
+        <div style="font-size: 11px; color: var(--pt-blue-light); margin-top: 4px; font-weight: 600;">Service Logs Saved</div>
+      </div>
+    </div>
+
+    <div class="pt-grid-2">
+      <!-- Left: Technicians Ranking & Performance -->
+      <div class="pt-card">
+        <div class="pt-card-title">Technicians Rank &amp; Performance</div>
+        ${techRankings.length ? `
+          <div style="display: flex; flex-direction: column; gap: 14px;">
+            ${techRankings.map((t, idx) => {
+              let medalClass = "";
+              if (idx === 0) medalClass = "gold";
+              else if (idx === 1) medalClass = "silver";
+              else if (idx === 2) medalClass = "bronze";
+
+              return `
+                <div class="pt-admin-rank-row">
+                  <div class="pt-admin-rank-num ${medalClass}">${idx + 1}</div>
+                  <div class="pt-admin-rank-body">
+                    <div class="pt-admin-rank-name">${escapeHtml(Users.fullName(t))}</div>
+                    <div class="pt-admin-rank-sub">${t.completed.length} completed jobs · ${t.avgRating ? `${t.avgRating.toFixed(1)}★ avg` : "no ratings"}</div>
+                    <div class="pt-admin-progress-bar">
+                      <div class="pt-admin-progress-fill" style="width: ${t.compRate}%;"></div>
+                    </div>
+                  </div>
+                  <div style="font-size: 13px; font-weight: bold; color: var(--pt-navy); text-align: right; width: 45px;">
+                    ${t.compRate}%
+                  </div>
+                </div>
+              `;
+            }).join("")}
+          </div>
+        ` : `
+          <div class="pt-empty-state">No rankings calculated.</div>
+        `}
+      </div>
+
+      <!-- Right: Ratings Breakdown & Stalled Jobs Alerts -->
+      <div>
+        <!-- Ratings Breakdown -->
+        <div class="pt-card" style="margin-bottom: 20px;">
+          <div class="pt-card-title">Customer Ratings Ledger (${totalReviews} reviews)</div>
+          ${totalReviews ? [5, 4, 3, 2, 1].map(stars => {
+            const count = ratingCounts[stars];
+            const pct = totalReviews ? Math.round((count / totalReviews) * 100) : 0;
+            return `
+              <div class="pt-rating-dist-row">
+                <div class="pt-rating-dist-label">${stars} ★</div>
+                <div class="pt-rating-dist-bar">
+                  <div class="pt-rating-dist-fill" style="width: ${pct}%;"></div>
+                </div>
+                <div class="pt-rating-dist-count">${count}</div>
+              </div>
+            `;
+          }).join("") : `
+            <div class="pt-empty-state">No ratings available.</div>
+          `}
+        </div>
+
+        <!-- Stalled Jobs Warnings -->
+        <div class="pt-card">
+          <div class="pt-card-title" style="color: var(--pt-danger);">Operational Bottlenecks</div>
+          ${staleUnassigned.length || stuckInProgress.length ? `
+            <div style="display: flex; flex-direction: column; gap: 8px;">
+              ${staleUnassigned.map(j => `
+                <a href="#jobs/${j.id}" style="display: flex; flex-direction: column; padding: 10px; border-radius: 8px; background: #fffbeb; border: 1px solid #fde68a; text-decoration: none; color: inherit; margin-bottom: 4px;">
+                  <div style="font-size: 12.5px; font-weight: 700; color: #b45309;">⚠️ Stale Unassigned Job: ${j.jobNumber}</div>
+                  <div style="font-size: 11px; color: var(--pt-text-muted); margin-top: 2px;">Waiting assignment since: ${fmtDate(j.createdAt)} (${timeAgo(j.createdAt)})</div>
+                </a>
+              `).join("")}
+              ${stuckInProgress.map(j => `
+                <a href="#jobs/${j.id}" style="display: flex; flex-direction: column; padding: 10px; border-radius: 8px; background: #fef2f2; border: 1px solid #fecaca; text-decoration: none; color: inherit; margin-bottom: 4px;">
+                  <div style="font-size: 12.5px; font-weight: 700; color: #b91c1c;">🚨 Stuck Job: ${j.jobNumber}</div>
+                  <div style="font-size: 11px; color: var(--pt-text-muted); margin-top: 2px;">In Progress for ${timeAgo(j.startedAt)}</div>
+                </a>
+              `).join("")}
+            </div>
+          ` : `
+            <div class="pt-empty-state">💚 No operational bottlenecks identified. All requests processed efficiently.</div>
+          `}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+/* ============================================================
+   SUPREME ADMIN — Activity Log (#admin/activity)
+   ============================================================ */
+function renderAdminActivity(el, user) {
+  setPageTitle("Authorization History & Event Log", "Comprehensive system audit trails");
+
+  const limit = 80;
+  const feed = AdminStats.activityFeed(limit);
+
+  el.innerHTML = `
+    <div class="pt-card">
+      <div class="pt-card-title">Audit Ledger Feed (Last ${feed.length} Events)</div>
+      ${feed.length ? `
+        <div class="pt-activity-feed">
+          ${feed.map(a => `
+            <div class="pt-activity-item">
+              <div class="pt-activity-dot ${a.color}">${a.icon}</div>
+              <div class="pt-activity-body">
+                <div style="display: flex; justify-content: space-between; align-items: start;">
+                  <span class="pt-activity-title" style="font-size: 14px;">${a.title}</span>
+                  <span class="text-muted" style="font-size: 11px; font-weight: bold; white-space: nowrap;">${fmtDateTime(a.ts)}</span>
+                </div>
+                <div class="pt-activity-meta" style="font-size: 12.5px; margin-top: 4px;">${a.meta}</div>
+              </div>
+            </div>
+          `).join("")}
+        </div>
+      ` : `
+        <div class="pt-empty-state">No audit activities logged in this space.</div>
+      `}
+    </div>
+  `;
 }

@@ -318,6 +318,8 @@ const Users = {
    *   - "reject"     manager_pending stays, active: false (blocked)
    *   - "revoke"     manager stays,         active: false (blocked)
    *   - "reinstate"  active: true again (role — pending or manager — is untouched)
+   *   - "suspend"    manager stays, active: false (temporary pause — same as revoke internally)
+   *   - "activate"   active: true  (un-suspend an active manager without changing role)
    */
   async setManagerStatus(userId, action) {
     const db = _getFirestore();
@@ -332,14 +334,157 @@ const Users = {
       patch.active = false; patch.rejectedAt = now; patch.rejectedBy = me.id;
     } else if (action === "revoke") {
       patch.active = false; patch.revokedAt = now; patch.revokedBy = me.id;
-    } else if (action === "reinstate") {
+    } else if (action === "reinstate" || action === "activate") {
       patch.active = true; patch.reinstatedAt = now; patch.reinstatedBy = me.id;
+    } else if (action === "suspend") {
+      patch.active = false; patch.suspendedAt = now; patch.suspendedBy = me.id;
     } else {
       throw new Error("Unknown manager action.");
     }
     await db.collection("users").doc(userId).set(patch, { merge: true });
   },
+
+  /** Returns ALL technicians (including inactive) — for admin roster only. */
+  allTechniciansForAdmin() {
+    return _orgUsersCache.filter((u) => u.role === "technician");
+  },
 };
+
+/* ---------- AdminStats — pure-compute analytics helpers ----------
+   These never touch Firestore directly — they derive intelligence
+   from the live caches that are already synced via onSnapshot. They
+   can be called synchronously from any render function.
+   ----------------------------------------------------------------- */
+const AdminStats = {
+  /**
+   * Per-technician performance: completed jobs, avg rating, completion rate.
+   * Returns array sorted by completedJobs desc.
+   */
+  technicianPerformance() {
+    const techs = Users.allTechniciansForAdmin();
+    const jobs  = Jobs.all();
+    return techs.map((t) => {
+      const myJobs      = jobs.filter((j) => j.assignedTo === t.id);
+      const completed   = myJobs.filter((j) => j.status === "completed");
+      const ratedJobs   = completed.filter((j) => j.rating);
+      const avgRating   = ratedJobs.length
+        ? (ratedJobs.reduce((s, j) => s + j.rating, 0) / ratedJobs.length)
+        : 0;
+      const activeJobs  = myJobs.filter((j) => ["assigned","in_progress"].includes(j.status)).length;
+      const compRate    = myJobs.length ? Math.round((completed.length / myJobs.length) * 100) : 0;
+      return { ...t, myJobs, completed, ratedJobs, avgRating, activeJobs, compRate };
+    }).sort((a, b) => b.completed.length - a.completed.length);
+  },
+
+  /**
+   * Per-manager aggregated overview: technician count, job counts, avg rating.
+   * Returns array sorted by total jobs desc.
+   */
+  managerOverview() {
+    const managers = Users.managers();
+    const allTechs = Users.allTechniciansForAdmin();
+    const jobs     = Jobs.all();
+    const reviews  = Jobs.reviews();
+    return managers.map((m) => {
+      // In a single-tenant org every technician belongs to the same org as the
+      // manager, so we count them org-wide (authorizedBy linkage would be ideal
+      // but isn't guaranteed for every activation path).
+      const techCount   = allTechs.length; // single-tenant: same pool
+      const mgrJobs     = jobs; // single-tenant: manager sees all jobs
+      const totalJobs   = mgrJobs.length;
+      const activeJobs  = mgrJobs.filter((j) => ["assigned","in_progress"].includes(j.status)).length;
+      const completedJ  = mgrJobs.filter((j) => j.status === "completed").length;
+      const pendingJ    = mgrJobs.filter((j) => j.status === "pending").length;
+      const ratedJobs   = reviews;
+      const avgRating   = ratedJobs.length
+        ? (ratedJobs.reduce((s, j) => s + j.rating, 0) / ratedJobs.length)
+        : 0;
+      return { ...m, techCount, totalJobs, activeJobs, completedJ, pendingJ, avgRating };
+    });
+  },
+
+  /**
+   * Build an activity feed from the existing caches.
+   * Returns up to `limit` entries sorted newest-first.
+   */
+  activityFeed(limit = 30) {
+    const events = [];
+    const jobs   = Jobs.all();
+    const techs  = Users.allTechniciansForAdmin();
+    const allMgr = _orgUsersCache.filter((u) =>
+      ["manager","manager_pending"].includes(u.role));
+
+    // Job completions
+    jobs.filter((j) => j.status === "completed" && j.completedAt).forEach((j) => {
+      events.push({
+        type: "job_completed", ts: j.completedAt,
+        icon: "✅", color: "green",
+        title: `Job ${j.jobNumber} completed`,
+        meta: `Customer: ${j.customerName} · Technician: ${Users.fullName(Users.get(j.assignedTo))}`,
+      });
+    });
+    // Customer reviews
+    jobs.filter((j) => j.rating && j.reviewedAt).forEach((j) => {
+      events.push({
+        type: "review", ts: j.reviewedAt,
+        icon: "⭐", color: "amber",
+        title: `${j.rating}★ review from ${j.customerName}`,
+        meta: `Job ${j.jobNumber}${j.reviewComment ? ` — "${j.reviewComment.slice(0,60)}${j.reviewComment.length>60?"…":""}"` : ""}`,
+      });
+    });
+    // Manager registrations / approvals
+    allMgr.forEach((m) => {
+      if (m.createdAt) events.push({
+        type: "manager_registered", ts: m.createdAt,
+        icon: "👤", color: "blue",
+        title: `${Users.fullName(m)} registered as manager`,
+        meta: m.orgName || "Organization",
+      });
+      if (m.approvedAt) events.push({
+        type: "manager_approved", ts: m.approvedAt,
+        icon: "🛡", color: "green",
+        title: `${Users.fullName(m)} approved`,
+        meta: "Manager account activated",
+      });
+      if (m.revokedAt) events.push({
+        type: "manager_revoked", ts: m.revokedAt,
+        icon: "🚫", color: "red",
+        title: `${Users.fullName(m)} access revoked`,
+        meta: "Manager removed from active roster",
+      });
+    });
+    // Technician accounts created
+    techs.forEach((t) => {
+      if (t.createdAt) events.push({
+        type: "tech_created", ts: t.createdAt,
+        icon: "🔧", color: "purple",
+        title: `Technician account created for ${Users.fullName(t)}`,
+        meta: t.employeeId ? `Employee ID: ${t.employeeId}` : "No employee ID set",
+      });
+    });
+
+    return events
+      .filter((e) => e.ts)
+      .sort((a, b) => new Date(b.ts) - new Date(a.ts))
+      .slice(0, limit);
+  },
+
+  /** Derive technician status from live job data. */
+  technicianStatus(techId) {
+    const tech = Users.get(techId);
+    if (!tech) return "offline";
+    if (tech.active === false) return "inactive";
+    const jobs = Jobs.all();
+    const inProgress = jobs.find((j) => j.assignedTo === techId && j.status === "in_progress");
+    if (inProgress) return "on-duty";
+    if (tech.status === "on-break" || tech.status === "break") return "on-break";
+    if (tech.status === "offline") return "offline";
+    const assigned   = jobs.find((j) => j.assignedTo === techId && j.status === "assigned");
+    if (assigned) return "available";
+    return tech.status || "available";
+  },
+};
+
 
 /* ---------- Jobs (Firestore-backed, org-scoped) ---------- */
 // Job numbers used to be derived from `_jobsCache.length + 1`, which is a

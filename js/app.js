@@ -98,6 +98,37 @@ function isManagerLike(user) {
   return !!user && (user.role === "manager" || user.role === "admin");
 }
 
+// ── Password field with a "Show/Hide" toggle ────────────────────────────
+// Used on every registration/account-creation form (login, manager
+// registration, customer sign-up, technician activation, the Supreme Admin
+// claim screen, and the admin's "Add a Manager" form) so the person can
+// double-check what they typed before submitting.
+function pwField(id, labelText, placeholder = "", autocomplete = "") {
+  return `
+    <label class="form-label">${labelText}</label>
+    <div style="position:relative;">
+      <input type="password" class="form-control pt-pw-input" id="${id}" placeholder="${placeholder}"
+        ${autocomplete ? `autocomplete="${autocomplete}"` : ""} style="padding-right:58px;">
+      <button type="button" class="pt-pw-toggle" data-target="${id}" aria-label="Show password"
+        style="position:absolute;right:6px;top:50%;transform:translateY(-50%);background:none;border:none;
+        color:#2563EB;font-size:12px;font-weight:700;cursor:pointer;padding:4px 6px;">Show</button>
+    </div>`;
+}
+
+// Single delegated listener (attached once) rather than re-wiring buttons
+// after every innerHTML re-render — works for every pwField() instance
+// anywhere in the app, present now or added later.
+document.addEventListener("click", (e) => {
+  const btn = e.target.closest(".pt-pw-toggle");
+  if (!btn) return;
+  const input = document.getElementById(btn.getAttribute("data-target"));
+  if (!input) return;
+  const nowShowing = input.type === "password";
+  input.type = nowShowing ? "text" : "password";
+  btn.textContent = nowShowing ? "Hide" : "Show";
+  btn.setAttribute("aria-label", nowShowing ? "Hide password" : "Show password");
+});
+
 function starRating(n, max = 5) {
   const filled = "&#9733;".repeat(n || 0);
   const empty = "&#9734;".repeat(max - (n || 0));
@@ -120,6 +151,14 @@ function navigate(hash) {
 function router() {
   const user = Auth.currentUser();
   if (!user) {
+    // The Supreme Admin claim screen is intentionally NOT linked anywhere
+    // in the login UI (see renderLogin) — it's only reachable by typing
+    // this exact URL directly, and even then Auth.claimAdmin() will reject
+    // any email that isn't on the ADMIN_ALLOWED_EMAILS allowlist in data.js.
+    if (parseHash().route === "claim-admin") {
+      renderClaimAdmin();
+      return;
+    }
     renderLogin();
     return;
   }
@@ -293,8 +332,7 @@ function renderLogin() {
           <input type="email" class="form-control" id="login-email" placeholder="you@example.com" autocomplete="email">
         </div>
         <div class="field">
-          <label class="form-label">Password</label>
-          <input type="password" class="form-control" id="login-password" placeholder="Your password" autocomplete="current-password">
+          ${pwField("login-password", "Password", "Your password", "current-password")}
         </div>
 
         <button class="btn btn-pt-primary btn-block" id="btn-signin" style="margin-top:6px;">
@@ -318,9 +356,6 @@ function renderLogin() {
           <div>
             Authorized Technician? <a href="#" id="link-activate" style="color:#0f172a;font-weight:600;">Activate Technician Account</a>
           </div>
-        </div>
-        <div id="claim-admin-row" style="display:none;margin-top:10px;padding-top:10px;border-top:1px dashed #e2e8f0;font-size:12.5px;text-align:center;">
-          First time setting this up? <a href="#" id="link-claim-admin" style="color:#7c3aed;font-weight:700;">Claim Supreme Admin Access</a>
         </div>
       </div>
     </div>
@@ -412,17 +447,6 @@ function renderLogin() {
     renderCustomerRegister();
   });
 
-  // ── Supreme Admin claim link — only ever shown while unclaimed ──────────
-  document.getElementById("link-claim-admin").addEventListener("click", (e) => {
-    e.preventDefault();
-    renderClaimAdmin();
-  });
-  Auth.isAdminBootstrapAvailable()
-    .then((available) => {
-      const row = document.getElementById("claim-admin-row");
-      if (available && row) row.style.display = "block";
-    })
-    .catch(() => {});
 }
 
 /* ============================================================
@@ -435,9 +459,9 @@ function renderClaimAdmin() {
         <div class="pt-auth-logo">PT</div>
         <h4 style="font-weight:700;color:#0f172a;margin-bottom:4px;">Claim Supreme Admin Access</h4>
         <p style="color:#64748b;font-size:13px;margin-bottom:18px;">
-          One-time setup for this deployment. Whoever claims this becomes the Supreme Admin — able to approve
-          new managers, manage every role, and see system-wide issues. This can only ever be claimed once;
-          if someone already has, you'll be sent back to Sign In.
+          One-time setup for this deployment, restricted to a specific pre-approved email address. Whoever claims
+          this becomes the Supreme Admin — able to approve new managers, manage every role, and see system-wide
+          issues. This can only ever be claimed once; if someone already has, you'll be sent back to Sign In.
         </p>
 
         <div id="admin-error" style="display:none;background:#FBE1E1;color:#D64545;padding:10px 14px;border-radius:10px;font-size:13px;margin-bottom:12px;"></div>
@@ -451,8 +475,8 @@ function renderClaimAdmin() {
           <input type="email" class="form-control" id="admin-email" placeholder="admin@company.com">
         </div>
         <div class="form-row cols-2">
-          <div><label class="form-label">Password</label><input type="password" class="form-control" id="admin-pw" placeholder="Min. 6 characters"></div>
-          <div><label class="form-label">Confirm Password</label><input type="password" class="form-control" id="admin-pw2"></div>
+          <div>${pwField("admin-pw", "Password", "Min. 6 characters")}</div>
+          <div>${pwField("admin-pw2", "Confirm Password")}</div>
         </div>
 
         <button class="btn btn-pt-primary btn-block" id="btn-claim-admin" style="margin-top:6px;background:#7c3aed;border-color:#7c3aed;">
@@ -468,7 +492,11 @@ function renderClaimAdmin() {
   const errEl = document.getElementById("admin-error");
   function showErr(msg) { errEl.textContent = msg; errEl.style.display = "block"; }
 
-  document.getElementById("back-to-login").addEventListener("click", (e) => { e.preventDefault(); renderLogin(); });
+  document.getElementById("back-to-login").addEventListener("click", (e) => {
+    e.preventDefault();
+    window.location.hash = ""; // leave the hidden #claim-admin route
+    renderLogin();
+  });
 
   document.getElementById("btn-claim-admin").addEventListener("click", async () => {
     const btn    = document.getElementById("btn-claim-admin");
@@ -528,8 +556,8 @@ function renderRegister() {
           <input type="email" class="form-control" id="reg-email" placeholder="manager@company.com">
         </div>
         <div class="form-row cols-2">
-          <div><label class="form-label">Password</label><input type="password" class="form-control" id="reg-pw" placeholder="Min. 6 characters"></div>
-          <div><label class="form-label">Confirm Password</label><input type="password" class="form-control" id="reg-pw2"></div>
+          <div>${pwField("reg-pw", "Password", "Min. 6 characters")}</div>
+          <div>${pwField("reg-pw2", "Confirm Password")}</div>
         </div>
 
         <button class="btn btn-pt-primary btn-block" id="btn-register" style="margin-top:6px;">
@@ -618,8 +646,7 @@ function renderActivateTechnician() {
           <input type="email" class="form-control" id="tech-email" placeholder="technician@company.com">
         </div>
         <div class="field">
-          <label class="form-label">Set Your Password</label>
-          <input type="password" class="form-control" id="tech-pw" placeholder="Min. 6 characters">
+          ${pwField("tech-pw", "Set Your Password", "Min. 6 characters")}
         </div>
 
         <button class="btn btn-pt-primary btn-block" id="btn-activate">
@@ -749,8 +776,8 @@ function renderCustomerRegister() {
           <input type="text" class="form-control" id="cust-phone" placeholder="e.g. 0712345678">
         </div>
         <div class="form-row cols-2">
-          <div><label class="form-label">Password</label><input type="password" class="form-control" id="cust-pw" placeholder="Min. 6 characters"></div>
-          <div><label class="form-label">Confirm Password</label><input type="password" class="form-control" id="cust-pw2"></div>
+          <div>${pwField("cust-pw", "Password", "Min. 6 characters")}</div>
+          <div>${pwField("cust-pw2", "Confirm Password")}</div>
         </div>
 
         <button class="btn btn-pt-primary btn-block" id="btn-cust-register" style="margin-top:6px;">
@@ -918,12 +945,34 @@ function renderAdminOverview(el, user) {
    SUPREME ADMIN — Manager Approvals (#admin/managers)
    ============================================================ */
 function renderAdminManagers(el, user) {
-  setPageTitle("Manager Approvals", "Approve, reject, or revoke manager access");
+  setPageTitle("Manager Approvals", "Add managers directly, or approve/reject/revoke self-registered requests");
   const pending = Users.pendingManagers();
   const active = Users.managers();
   const rejected = Users.rejectedManagers();
 
   el.innerHTML = `
+    <div class="pt-card" style="max-width:600px;margin-bottom:20px;">
+      <div class="pt-card-title">&#128100; Add a Manager</div>
+      <p style="font-size:13px;color:#64748b;margin-bottom:14px;">
+        Only the Supreme Admin can create a manager account this way. Set their email and password here — the
+        account is created and made active immediately, so they can sign in right away with these credentials.
+      </p>
+      <div id="add-mgr-err" style="display:none;background:#FBE1E1;color:#D64545;padding:9px 12px;border-radius:9px;font-size:12.5px;margin-bottom:10px;"></div>
+      <div id="add-mgr-ok"  style="display:none;background:#dcfce7;color:#166534;padding:9px 12px;border-radius:9px;font-size:12.5px;margin-bottom:10px;"></div>
+      <div class="form-row cols-2" style="margin-bottom:0;">
+        <div><label class="form-label">First Name</label><input type="text" class="form-control" id="mgr-fname" placeholder="Grace"></div>
+        <div><label class="form-label">Last Name</label><input type="text" class="form-control" id="mgr-lname" placeholder="Wanjiru"></div>
+      </div>
+      <div class="field">
+        <label class="form-label">Manager Email</label>
+        <input type="email" class="form-control" id="mgr-email" placeholder="manager@company.com">
+      </div>
+      <div class="field">
+        ${pwField("mgr-pw", "Set Their Password", "Min. 6 characters")}
+      </div>
+      <button class="btn btn-pt-primary mt-3" id="btn-add-mgr">Create Manager Account</button>
+    </div>
+
     <div class="pt-card" style="margin-bottom:20px;">
       <div class="pt-card-title">Pending Requests (${pending.length})</div>
       ${pending.length ? `
@@ -953,6 +1002,7 @@ function renderAdminManagers(el, user) {
             <td>${escapeHtml(m.orgName) || "—"}</td>
             <td>${m.approvedAt ? fmtDate(m.approvedAt) : "—"}</td>
             <td style="text-align:right;white-space:nowrap;">
+              <button class="btn btn-pt-outline btn-sm" data-show-pw="${m.id}">Show Password</button>
               <button class="btn btn-pt-outline btn-sm" data-reset-pw="${escapeHtml(m.email || m.username)}">Send Reset Email</button>
               <button class="btn btn-danger-outline btn-sm" data-revoke-mgr="${m.id}">Revoke Access</button>
             </td>
@@ -1038,6 +1088,77 @@ function renderAdminManagers(el, user) {
         btn.disabled = false;
       }
     });
+  });
+
+  // Reveal the password stored at account-creation time — only works for
+  // managers created right here via "Add a Manager" (see adminCreateManager
+  // in data.js). A self-registered manager has no stored password, same
+  // as any self-activated account; the toast below explains that case.
+  el.querySelectorAll("[data-show-pw]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const id = btn.getAttribute("data-show-pw");
+      const original = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = "Loading…";
+      try {
+        const rec = await Auth.getStoredPassword(id);
+        if (!rec || !rec.lastKnownPassword) {
+          toast("No stored password on file for this account — it likely self-registered, or has changed its password since. Use \"Send Reset Email\" instead.", "info");
+          return;
+        }
+        const setWhen = rec.setAt ? fmtDateTime(rec.setAt) : "an earlier date";
+        const copy = confirm(
+          `Password set at account creation (by ${rec.setByName || "the Supreme Admin"} on ${setWhen}):\n\n${rec.lastKnownPassword}\n\n` +
+          `Note: if this person has changed their password since, this will no longer work.\n\nClick OK to copy it to your clipboard.`
+        );
+        if (copy && navigator.clipboard) {
+          navigator.clipboard.writeText(rec.lastKnownPassword).catch(() => {});
+        }
+      } catch (err) {
+        toast(err.message || "Couldn't load the stored password.", "error");
+      } finally {
+        btn.disabled = false;
+        btn.textContent = original;
+      }
+    });
+  });
+
+  // ── Add-manager button handler — Supreme-Admin-only direct account
+  //    creation (mirrors "Add a Technician" in renderStaffList). ─────────
+  document.getElementById("btn-add-mgr").addEventListener("click", async () => {
+    const btn    = document.getElementById("btn-add-mgr");
+    const fname  = document.getElementById("mgr-fname").value.trim();
+    const lname  = document.getElementById("mgr-lname").value.trim();
+    const email  = document.getElementById("mgr-email").value.trim().toLowerCase();
+    const pw     = document.getElementById("mgr-pw").value;
+    const errEl  = document.getElementById("add-mgr-err");
+    const okEl   = document.getElementById("add-mgr-ok");
+
+    errEl.style.display = "none";
+    okEl.style.display  = "none";
+
+    if (!fname || !lname || !email) { errEl.textContent = "Please fill in the manager's name and email."; errEl.style.display = "block"; return; }
+    if (!pw || pw.length < 6) { errEl.textContent = "Please set a password of at least 6 characters."; errEl.style.display = "block"; return; }
+
+    btn.disabled = true;
+    btn.textContent = "Creating account…";
+
+    try {
+      await Auth.adminCreateManager(email, pw, { firstName: fname, lastName: lname });
+      okEl.textContent = `✓ Manager account created for ${email}. Give them this email and password — they can sign in right away.`;
+      okEl.style.display = "block";
+      toast(`Manager account created for ${email}`, "success");
+      document.getElementById("mgr-fname").value = "";
+      document.getElementById("mgr-lname").value = "";
+      document.getElementById("mgr-email").value = "";
+      document.getElementById("mgr-pw").value = "";
+    } catch (err) {
+      errEl.textContent = Auth.getErrorMessage(err.code) || err.message || "Failed to create manager account. Please try again.";
+      errEl.style.display = "block";
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Create Manager Account";
+    }
   });
 }
 

@@ -57,6 +57,17 @@ service cloud.firestore {
           || get(/databases/$(database)/documents/meta/adminBootstrap).data.claimed != true;
     }
 
+    // The ONLY email address(es) allowed to ever claim the Supreme Admin
+    // bootstrap. This is the real security boundary for admin creation —
+    // the matching ADMIN_ALLOWED_EMAILS list in js/data.js is just a
+    // friendly client-side error message; a malicious client could edit
+    // that file, but not this rule. Keep both lists in sync (same
+    // email(s), lowercase) and redeploy this file whenever they change.
+    // TODO: replace this placeholder with your real admin email(s).
+    function isAllowedAdminEmail(email) {
+      return email in ["admin@primetelecoms.com"];
+    }
+
     // The Supreme Admin approving, rejecting, revoking, or reinstating a
     // manager account. This is the ONLY path that can move a profile
     // between "manager_pending" and "manager" (in either direction) —
@@ -99,10 +110,12 @@ service cloud.firestore {
     }
 
     // A manager may flip a customer<->technician role for someone in their
-    // own org — but this NEVER grants the "manager" role itself (that stays
-    // self-service-registration-only, see /users create rule above) and it
-    // can never touch organizationId. Only the role/audit/active fields may
-    // move; everything else about the target profile is frozen in this op.
+    // own org — but this NEVER grants the "manager" role itself (granting
+    // "manager" only ever happens via self-registration + admin approval,
+    // or via the admin's direct manager_authorizations-backed create — see
+    // /users create rule above) and it can never touch organizationId.
+    // Only the role/audit/active fields may move; everything else about
+    // the target profile is frozen in this op.
     function isManagerRoleToggle() {
       return isManagerLike()
           && myOrg() == resource.data.organizationId
@@ -135,11 +148,20 @@ service cloud.firestore {
       //    controls technician roles" — a client cannot fabricate a
       //    technician profile without it.
       //  - "admin" → ONLY while the one-time Supreme Admin claim is still
-      //    unclaimed (see adminBootstrapAvailable() above). There is no
+      //    unclaimed (see adminBootstrapAvailable() above) AND the email
+      //    is on the isAllowedAdminEmail() allowlist above. There is no
       //    other path in these rules that can ever produce an "admin"
       //    profile — nobody, including an existing admin, can promote a
-      //    second admin later. This is intentionally a single, narrow
-      //    bootstrap door, not an ongoing admin-creation feature.
+      //    second admin later. This is intentionally a single, narrow,
+      //    identity-gated bootstrap door, not an ongoing admin-creation
+      //    feature — and the claim screen itself is never linked in the
+      //    app UI (see app.js), so it's both restricted and hidden.
+      //  - "manager" → ONLY if the Supreme Admin has already authorized
+      //    this exact email in /manager_authorizations with status
+      //    "authorized" (see isAdmin()-gated write rule on that collection
+      //    below). This is the server-side enforcement of "a manager is
+      //    added by the admin" — a client cannot fabricate an active
+      //    manager profile without the admin having authorized it first.
       allow create: if isOwner(userId) && (
         request.resource.data.role in ["manager_pending", "customer"] ||
         (
@@ -148,8 +170,14 @@ service cloud.firestore {
           get(/databases/$(database)/documents/tech_authorizations/$(request.resource.data.email)).data.status == "authorized"
         ) ||
         (
+          request.resource.data.role == "manager" &&
+          exists(/databases/$(database)/documents/manager_authorizations/$(request.resource.data.email)) &&
+          get(/databases/$(database)/documents/manager_authorizations/$(request.resource.data.email)).data.status == "authorized"
+        ) ||
+        (
           request.resource.data.role == "admin" &&
-          adminBootstrapAvailable()
+          adminBootstrapAvailable() &&
+          isAllowedAdminEmail(request.resource.data.email)
         )
       );
 
@@ -174,8 +202,8 @@ service cloud.firestore {
 
     // ── Bootstrap Singleton (/meta/adminBootstrap) ─────────────────────────
     // Tracks whether the one-time Supreme Admin claim has been used yet.
-    // Any signed-in user may read it (the login screen checks it to decide
-    // whether to show "Claim Supreme Admin Access" at all). It can only
+    // Any signed-in user may read it (Auth.isAdminBootstrapAvailable() in
+    // data.js checks it before allowing a claim attempt). It can only
     // ever be created as unclaimed, and can only ever flip false -> true
     // once — never back. The actual admin profile create (above) and this
     // flip happen together in a single client-side Firestore transaction,
@@ -216,6 +244,17 @@ service cloud.firestore {
     match /tech_authorizations/{email} {
       allow read:  if isAuth(); // technicians self-check their own email during activation
       allow write: if isManagerLike(); // ONLY managers/admin may authorize or revoke technicians
+    }
+
+    // ── Manager Authorizations (/manager_authorizations/{email}) ─────────────
+    // This collection IS the access-control list for the manager role,
+    // mirroring tech_authorizations above. Write access is deliberately
+    // narrower than the technician version: ONLY the Supreme Admin
+    // (isAdmin(), not isManagerLike()) may authorize a manager — an
+    // existing manager can never create a peer manager account.
+    match /manager_authorizations/{email} {
+      allow read:  if isAuth();
+      allow write: if isAdmin();
     }
 
     // ── Jobs (/jobs/{jobId}) ───────────────────────────────────────────────

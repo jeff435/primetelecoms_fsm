@@ -13,6 +13,22 @@
 // pre-existing accounts).
 const DEFAULT_ORG_ID = "org_primetelecoms";
 
+// ── Supreme Admin allowlist ──────────────────────────────────────────────
+// ONLY these exact email addresses are ever allowed to claim the one-time
+// Supreme Admin bootstrap (see Auth.claimAdmin below). This is what makes
+// admin creation a controlled, specific-identity door instead of "whoever
+// clicks the link first" — anyone who isn't on this list gets a clear
+// rejection even if they find the hidden claim screen.
+//
+// IMPORTANT: this array is only a friendly client-side check. The actual
+// security boundary is the matching isAllowedAdminEmail() list in
+// firestore.rules — that's what a malicious client can't bypass by editing
+// this file. Keep BOTH lists in sync (same email(s), lowercase), and
+// redeploy firestore.rules after changing it.
+//
+// TODO: replace this placeholder with your real admin email/Gmail address.
+const ADMIN_ALLOWED_EMAILS = ["admin@primetelecoms.com"];
+
 function uid(prefix) {
   return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -586,6 +602,11 @@ const Auth = {
     await auth.sendPasswordResetEmail(email);
   },
 
+  /** Whether an email is on the Supreme Admin allowlist (see ADMIN_ALLOWED_EMAILS above). */
+  isAllowedAdminEmail(email) {
+    return ADMIN_ALLOWED_EMAILS.includes((email || "").trim().toLowerCase());
+  },
+
   /** Whether the one-time Supreme Admin claim is still unclaimed. */
   async isAdminBootstrapAvailable() {
     const db = _getFirestore();
@@ -609,11 +630,21 @@ const Auth = {
    * silently retries the loser, which then sees claimed:true and aborts.
    * If that happens, the just-created Auth account is deleted again so no
    * orphaned account is left behind.
+   *
+   * Also gated by ADMIN_ALLOWED_EMAILS above — even the very first person
+   * to reach this screen can't claim Supreme Admin unless their email is
+   * on that allowlist. This screen itself is never linked anywhere in the
+   * UI (see renderLogin in app.js) — it's only reachable by navigating
+   * directly to #claim-admin, so the door is both identity-gated and hidden.
    */
   async claimAdmin(email, password, firstName, lastName) {
     const auth = _getAuth();
     const db = _getFirestore();
     if (!auth || !db) throw new Error("Firebase not initialized");
+
+    if (!Auth.isAllowedAdminEmail(email)) {
+      throw new Error("This email isn't authorized to claim Supreme Admin access.");
+    }
 
     const available = await Auth.isAdminBootstrapAvailable();
     if (!available) throw new Error("Supreme Admin access has already been claimed for this deployment. Please sign in normally.");
@@ -698,6 +729,114 @@ const Auth = {
       createdAt: new Date().toISOString(),
       ...techData,
     }, { merge: true });
+  },
+
+  // ── Manager management (admin-only — this IS the "manager added by the
+  //    admin" control the Supreme Admin uses instead of relying on
+  //    self-registration; mirrors the technician flow directly below) ─────
+
+  /** Admin authorizes a manager email for their organization. */
+  async authorizeManager(orgId, mgrEmail, mgrData = {}) {
+    const db = _getFirestore();
+    if (!db) throw new Error("Firestore not available");
+    await db.collection("manager_authorizations").doc(mgrEmail.toLowerCase()).set({
+      email: mgrEmail.toLowerCase(),
+      organizationId: orgId,
+      status: "authorized",
+      authorizedBy: _currentProfile ? _currentProfile.id : "unknown",
+      createdAt: new Date().toISOString(),
+      ...mgrData,
+    }, { merge: true });
+  },
+
+  /** Admin revokes a manager authorization record (used to clean up a failed create). */
+  async revokeManagerAuthorization(mgrEmail) {
+    const db = _getFirestore();
+    if (!db) throw new Error("Firestore not available");
+    await db.collection("manager_authorizations").doc(mgrEmail.toLowerCase()).set({
+      status: "revoked",
+      revokedBy: _currentProfile ? _currentProfile.id : "unknown",
+      revokedAt: new Date().toISOString(),
+    }, { merge: true });
+  },
+
+  /**
+   * Supreme-Admin-only: create a manager's Firebase Auth account AND their
+   * Firestore profile directly, active immediately with role "manager" and
+   * a password the ADMIN chooses — this is what lets the admin add a
+   * manager from inside the system instead of waiting on self-registration.
+   * Mirrors managerCreateTechnician exactly (see that function for why the
+   * secondary app instance is required to avoid disturbing the admin's own
+   * session), gated by isAdmin() rather than isManagerLike(), and backed by
+   * the manager_authorizations ledger (server-enforced in firestore.rules)
+   * rather than tech_authorizations.
+   */
+  async adminCreateManager(email, password, mgrData = {}) {
+    const me = _currentProfile;
+    if (!me || me.role !== "admin") throw new Error("Only the Supreme Admin can add a manager account.");
+    email = (email || "").trim().toLowerCase();
+    if (!email) throw new Error("Manager email is required.");
+    if (!password || password.length < 6) throw new Error("Password must be at least 6 characters.");
+
+    if (!window.PrimeFirebase || typeof window.PrimeFirebase.getSecondaryAuth !== "function") {
+      throw new Error("Firebase isn't ready yet — please try again in a moment.");
+    }
+    const secAuth = window.PrimeFirebase.getSecondaryAuth();
+    const secDb = window.PrimeFirebase.getSecondaryFirestore();
+    if (!secAuth || !secDb) throw new Error("Couldn't start account creation — Firebase isn't initialized.");
+
+    const orgId = me.organizationId || DEFAULT_ORG_ID;
+
+    // Step 1 — authorize the email first, so the profile-create rule
+    // (which checks manager_authorizations) is satisfied by the time we get to step 2.
+    await Auth.authorizeManager(orgId, email, {
+      firstName: mgrData.firstName || "", lastName: mgrData.lastName || "",
+    });
+
+    // Step 2 — create the Auth account + Firestore profile via the secondary app.
+    let cred;
+    try {
+      cred = await secAuth.createUserWithEmailAndPassword(email, password);
+    } catch (err) {
+      // Don't leave a "ghost" authorization behind for an account that
+      // never actually got created.
+      await Auth.revokeManagerAuthorization(email).catch(() => {});
+      throw err;
+    }
+
+    try {
+      const displayName = `${mgrData.firstName || ""} ${mgrData.lastName || ""}`.trim();
+      if (displayName) await cred.user.updateProfile({ displayName });
+
+      const profile = {
+        uid: cred.user.uid,
+        email,
+        firstName: mgrData.firstName || "",
+        lastName: mgrData.lastName || "",
+        role: "manager",
+        organizationId: orgId,
+        orgName: mgrData.orgName || me.orgName || "",
+        active: true,
+        createdBy: me.id,
+        createdAt: new Date().toISOString(),
+        approvedAt: new Date().toISOString(),
+        approvedBy: me.id,
+      };
+      await secDb.collection("users").doc(cred.user.uid).set(profile, { merge: true });
+      // Stash the password the admin just chose, same private-subcollection
+      // pattern as managerCreateTechnician — never on the /users doc itself.
+      await secDb.collection("users").doc(cred.user.uid).collection("private").doc("credentials").set({
+        lastKnownPassword: password,
+        setAt: new Date().toISOString(),
+        setBy: me.id,
+        setByName: Users.fullName(me),
+      });
+      return { id: cred.user.uid, ...profile };
+    } finally {
+      // Always sign the secondary session back out, success or failure —
+      // it must never linger as a second live session.
+      await secAuth.signOut().catch(() => {});
+    }
   },
 
   /** Manager revokes a technician's authorization (blocks future activation and access). */

@@ -26,7 +26,7 @@ const DEFAULT_ORG_ID = "org_primetelecoms";
 // this file. Keep BOTH lists in sync (same email(s), lowercase), and
 // redeploy firestore.rules after changing it.
 //
-const ADMIN_ALLOWED_EMAILS = ["printexenginieers@gmail.com"];
+const ADMIN_ALLOWED_EMAILS = ["nevisjeff05@gmail.com"];
 
 function uid(prefix) {
   return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;

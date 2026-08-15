@@ -157,7 +157,13 @@ function router() {
     } else if (route === "claim-admin") {
       renderClaimAdmin();
     } else if (route === "register") {
-      renderRegister();
+      // Manager self-registration has been removed: managers are created
+      // top-down by the Supreme Admin ("Add a Manager" in #admin/managers
+      // → Auth.adminCreateManager), which writes the manager_authorizations
+      // record that firestore.rules requires before a "manager" profile can
+      // exist at all. Anyone landing on the old #register link is sent back
+      // to the portal gateway.
+      renderRoleGateway();
     } else if (route === "activate-technician") {
       renderActivateTechnician();
     } else if (route === "register-customer") {

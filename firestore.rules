@@ -64,7 +64,7 @@ service cloud.firestore {
     // that file, but not this rule. Keep both lists in sync (same
     // email(s), lowercase) and redeploy this file whenever they change.
     function isAllowedAdminEmail(email) {
-      return email in ["printexenginieers@gmail.com"];
+      return email in ["nevisjeff05@gmail.com"];
     }
 
     // The Supreme Admin approving, rejecting, revoking, or reinstating a
@@ -133,14 +133,9 @@ service cloud.firestore {
 
       // Create: only the account owner, and only for a role they're actually
       // allowed to self-assign:
-      //  - "manager_pending" → self-service registration, but this grants
-      //    NO manager access on its own (see isManager()/isManagerLike()
-      //    above, which only ever match role == "manager"). The Supreme
-      //    Admin must separately approve the request — see
-      //    isAdminManagerDecision() — before it becomes a working
-      //    "manager" account. This is the server-side enforcement of
-      //    "the admin grants manager access", not just a client-side gate.
-      //  - "customer" → self-service registration
+      //  - "customer" → self-service registration. This is the ONLY role
+      //    anyone can ever self-assign; every other role below requires a
+      //    prior authorization written by someone who already has power.
       //  - "technician" → ONLY if a manager/admin has already authorized
       //    this exact email in /tech_authorizations with status
       //    "authorized". This is the server-side enforcement of "admin
@@ -162,7 +157,7 @@ service cloud.firestore {
       //    added by the admin" — a client cannot fabricate an active
       //    manager profile without the admin having authorized it first.
       allow create: if isOwner(userId) && (
-        request.resource.data.role in ["manager_pending", "customer"] ||
+        request.resource.data.role == "customer" ||
         (
           request.resource.data.role == "technician" &&
           exists(/databases/$(database)/documents/tech_authorizations/$(request.resource.data.email)) &&

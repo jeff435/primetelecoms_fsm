@@ -598,13 +598,23 @@ let _currentProfile = null;
 
 async function _readProfile(uid) {
   const db = _getFirestore();
-  if (!db) return null;
+  if (!db) return { exists: false, profile: null, failed: true };
   try {
     const doc = await db.collection("users").doc(uid).get();
-    return doc.exists ? { id: uid, ...doc.data() } : null;
+    // doc.exists === false is a CONFIRMED "no profile" — safe to treat as
+    // a genuine first-time sign-in. Any thrown error below is NOT the same
+    // thing: it means we couldn't determine whether a profile exists at
+    // all (offline, flaky network, blocked request, permission hiccup).
+    // Conflating the two used to cause a serious bug: on a bad connection,
+    // an EXISTING manager/technician's profile read would fail, the code
+    // would assume "new user," and create/merge a fresh profile with the
+    // default role "customer" — silently overwriting their real role in
+    // Firestore. See loadProfile() below for how `failed` is used to stop
+    // that from happening.
+    return { exists: doc.exists, profile: doc.exists ? { id: uid, ...doc.data() } : null, failed: false };
   } catch (e) {
     console.error("[Auth] Firestore read error:", e);
-    return null;
+    return { exists: false, profile: null, failed: true };
   }
 }
 
@@ -635,9 +645,23 @@ const Auth = {
       return null;
     }
 
-    let profile = await _readProfile(firebaseUser.uid);
+    let { exists, profile, failed } = await _readProfile(firebaseUser.uid);
 
-    if (!profile) {
+    if (failed) {
+      // We could NOT confirm whether this user already has a profile —
+      // do not guess. Guessing "no profile" here is what used to silently
+      // demote existing managers/technicians to "customer" on a flaky
+      // connection (see _readProfile above). Fail the sign-in loudly and
+      // let the person retry instead.
+      const err = new Error(
+        "Couldn't verify your account — this usually means a slow or unstable connection. " +
+        "Please check your internet connection and try signing in again."
+      );
+      err.code = "profile/read-failed";
+      throw err;
+    }
+
+    if (!exists) {
       // First sign-in — create profile.
       // Default role is "customer" for plain self-service sign-ins (e.g. Google)
       // since customers are the only role that registers without prior
@@ -1142,6 +1166,7 @@ const Auth = {
       "auth/cancelled-popup-request":"Sign-in was cancelled.",
       "auth/unauthorized-domain":    "This domain is not authorized for Firebase. Contact support.",
       "auth/api-key-not-valid":      "Firebase configuration error. Contact support.",
+      "profile/read-failed":         "Couldn't verify your account — this usually means a slow or unstable connection. Please check your internet connection and try signing in again.",
     };
     return map[code] || "Authentication failed. Please try again.";
   },

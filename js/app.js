@@ -325,6 +325,13 @@ window.addEventListener("DOMContentLoaded", () => {
         await Auth.loadProfile(firebaseUser);
       } catch (e) {
         console.error("[App] Profile load error:", e);
+        // Same protection as the explicit sign-in flow: if we can't
+        // confirm the profile, we do NOT let a stale/guessed role stand.
+        // _currentProfile is left null, so router() below treats this as
+        // signed-out rather than silently showing the wrong dashboard.
+        if (typeof toast === "function") {
+          toast("Couldn't verify your account (connection issue). Please sign in again.", "error");
+        }
       }
     } else {
       // No Firebase session — clear cached profile

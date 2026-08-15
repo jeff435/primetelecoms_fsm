@@ -425,12 +425,18 @@ function renderRoleLogin(role) {
   } else if (role === "manager") {
     title = "Operations Desk Access";
     icon = "🏢";
-    registerLinkHtml = `<div style="margin-top: 14px; font-size: 13px;"><a href="#register" style="color: #2563EB; font-weight: 600;">Register Organization Space</a></div>`;
+    // No self-registration link here on purpose: manager accounts are
+    // provisioned top-down by the Supreme Admin ("Add a Manager" inside
+    // #admin/managers → Auth.adminCreateManager), not by public sign-up.
+    // Keeping a self-registration link here would let anyone request a
+    // manager account, undercutting the admin-authorized hierarchy.
     demoCredentials = { email: "manager@primetelecoms.com", label: "manager@primetelecoms.com / manager123" };
   } else if (role === "technician") {
     title = "Field Engineering Portal";
     icon = "🔧";
-    registerLinkHtml = `<div style="margin-top: 14px; font-size: 13px;"><a href="#activate-technician" style="color: #2563EB; font-weight: 600;">Activate Technician Account</a></div>`;
+    // Same reasoning as manager above: technician accounts are provisioned
+    // by their manager ("Add a Technician" inside #staff →
+    // Auth.managerCreateTechnician), not by public self-activation.
     demoCredentials = { email: "technician@primetelecoms.com", label: "technician@primetelecoms.com / technician123" };
   } else if (role === "customer") {
     title = "Client Service Desk";
@@ -445,6 +451,7 @@ function renderRoleLogin(role) {
   appRoot.innerHTML = `
     <div class="pt-auth-wrap">
       <div class="pt-auth-card">
+        <a href="#" id="btn-back-gateway" style="display:inline-flex; align-items:center; gap:5px; color:#64748b; font-weight:600; font-size:12.5px; text-decoration:none; margin-bottom:14px;">&larr; Change Portal</a>
         <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 18px;">
           <div class="pt-auth-logo" style="margin-bottom: 0;">PT</div>
           <span style="font-size: 26px;">${icon}</span>
@@ -478,10 +485,11 @@ function renderRoleLogin(role) {
           </div>
         ` : ""}
 
-        <div style="margin-top: 22px; padding-top: 18px; border-top: 1px solid #e2e8f0; text-align: center;">
-          <a href="#" style="color: #64748b; font-weight: 600; font-size: 13px;" id="btn-back-gateway">← Change Portal Gateway</a>
-          ${registerLinkHtml}
-        </div>
+        ${registerLinkHtml ? `
+          <div style="margin-top: 22px; padding-top: 18px; border-top: 1px solid #e2e8f0; text-align: center;">
+            ${registerLinkHtml}
+          </div>
+        ` : ""}
       </div>
     </div>
   `;
@@ -646,8 +654,6 @@ function renderRoleLogin(role) {
   document.getElementById("login-password").addEventListener("keydown", (e) => {
     if (e.key === "Enter") document.getElementById("btn-signin").click();
   });
-}
-
 }
 
 /* ============================================================
@@ -1090,6 +1096,7 @@ function renderAdminOverview(el, user) {
   const activeManagers = Users.managers();
   const technicians = Users.allTechniciansForAdmin();
   const activeTechnicians = Users.technicians();
+  const clientUsers = Users.customers();
 
   const ratedJobs = jobs.filter((j) => j.rating);
   const avgRating = ratedJobs.length ? (ratedJobs.reduce((s, j) => s + j.rating, 0) / ratedJobs.length) : 0;
@@ -1178,6 +1185,12 @@ function renderAdminOverview(el, user) {
         <div class="pt-admin-kpi-value">${jobs.length}</div>
         <div class="pt-admin-kpi-label">Total Jobs</div>
         <div class="pt-admin-kpi-sub">${jobs.filter(j => j.status === "completed").length} completed</div>
+      </div>
+      <div class="pt-admin-kpi-tile blue">
+        <span class="pt-admin-kpi-icon">👤</span>
+        <div class="pt-admin-kpi-value">${clientUsers.length}</div>
+        <div class="pt-admin-kpi-label">Client Users</div>
+        <div class="pt-admin-kpi-sub">${clientUsers.filter(c => c.active !== false).length} active accounts</div>
       </div>
       <div class="pt-admin-kpi-tile amber">
         <span class="pt-admin-kpi-icon">⭐️</span>

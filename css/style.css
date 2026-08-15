@@ -365,6 +365,7 @@ label.form-label { display: block; font-size: 13px; font-weight: 600; color: var
 .pt-admin-kpi-tile.red    { background: linear-gradient(135deg, #7f1d1d 0%, #D64545 100%); }
 .pt-admin-kpi-tile.purple { background: linear-gradient(135deg, #4c1d95 0%, #7c3aed 100%); }
 .pt-admin-kpi-tile.slate  { background: linear-gradient(135deg, #1e293b 0%, #475569 100%); }
+.pt-admin-kpi-tile.blue   { background: linear-gradient(135deg, #1e3a8a 0%, #2563EB 100%); }
 .pt-admin-kpi-icon { font-size: 24px; margin-bottom: 10px; display: block; }
 .pt-admin-kpi-value { font-size: 30px; font-weight: 800; line-height: 1; letter-spacing: -0.5px; margin-bottom: 4px; }
 .pt-admin-kpi-label { font-size: 11px; color: rgba(255,255,255,0.72); font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; }

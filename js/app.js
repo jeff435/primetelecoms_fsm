@@ -385,7 +385,7 @@ function renderRoleGateway() {
         <div class="pt-gateway-card" onclick="location.hash='#login/technician'" style="background: rgba(11, 37, 69, 0.65); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); border: 1px solid rgba(255,255,255,0.08); border-radius: 18px; padding: 26px; color: #fff; cursor: pointer; transition: transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease; display: flex; flex-direction: column; gap: 14px; box-shadow: 0 15px 35px rgba(0,0,0,0.2);">
           <div style="font-size: 32px;">🔧</div>
           <div>
-            <h4 style="margin: 0 0 6px; font-weight: 700; font-size: 16px; color: #fff;">Field Engineering Portal</h4>
+            <h4 style="margin: 0 0 6px; font-weight: 700; font-size: 16px; color: #fff;">Technician Portal</h4>
             <p style="margin: 0; font-size: 12.5px; color: #AEB9D6; line-height: 1.5;">View assigned jobs, update location status, log materials used, and submit site reports.</p>
           </div>
           <div style="margin-top: auto; font-size: 12.5px; font-weight: 700; color: var(--pt-amber); display: flex; align-items: center; gap: 4px;">Enter Field Workspace ➔</div>
@@ -428,7 +428,12 @@ function renderRoleLogin(role) {
   if (role === "admin") {
     title = "Supreme Admin Command Center";
     icon = "🛡️";
-    demoCredentials = { email: "admin@primetelecoms.com", label: "admin@primetelecoms.com / admin123" };
+    // No demo autofill here on purpose: unlike manager/technician/customer
+    // below, this is the ONE real, permanent owner login (now tied to
+    // printexenginieers@gmail.com — see ADMIN_ALLOWED_EMAILS in js/data.js
+    // and isAllowedAdminEmail() in firestore.rules). Auto-filling a real
+    // admin password on a public login screen would hand out full admin
+    // access to anyone who opens this page and clicks a button.
   } else if (role === "manager") {
     title = "Operations Desk Access";
     icon = "🏢";
@@ -439,7 +444,7 @@ function renderRoleLogin(role) {
     // manager account, undercutting the admin-authorized hierarchy.
     demoCredentials = { email: "manager@primetelecoms.com", label: "manager@primetelecoms.com / manager123" };
   } else if (role === "technician") {
-    title = "Field Engineering Portal";
+    title = "Technician Portal";
     icon = "🔧";
     // Same reasoning as manager above: technician accounts are provisioned
     // by their manager ("Add a Technician" inside #staff →
@@ -520,7 +525,7 @@ function renderRoleLogin(role) {
   if (autofillBtn) {
     autofillBtn.addEventListener("click", () => {
       document.getElementById("login-email").value = demoCredentials.email;
-      document.getElementById("login-password").value = role === "admin" ? "admin123" : `${role}123`;
+      document.getElementById("login-password").value = `${role}123`;
       toast("Demo credentials filled. Click Sign In to connect.", "success");
     });
   }
@@ -541,11 +546,15 @@ function renderRoleLogin(role) {
       _explicitAuthFlow = true;
       let fbUser = null;
 
-      // Self-healing check for default test accounts
-      if (email === "admin@primetelecoms.com" && password === "admin123") {
+      // Real Supreme Admin bootstrap: the FIRST time the allowlisted admin
+      // email signs in with whatever password they choose, this creates
+      // the Firebase Auth account and the matching Firestore profile in
+      // one shot. Every sign-in after that just goes through the normal
+      // signInWithEmail path below, since the account now exists.
+      if (role === "admin" && Auth.isAllowedAdminEmail(email)) {
         const bootstrapAvailable = await Auth.isAdminBootstrapAvailable();
         if (bootstrapAvailable) {
-          showInfo("Bootstrap check active. Setup Supreme Admin account...");
+          showInfo("Setting up your Supreme Admin account...");
           fbUser = await Auth.claimAdmin(email, password, "Supreme", "Admin");
         }
       } else if (email === "manager@primetelecoms.com" && password === "manager123") {
@@ -847,7 +856,7 @@ function renderActivateTechnician() {
       <div class="pt-auth-card" style="max-width:460px;">
         <div class="pt-auth-logo">PT</div>
         <h4 style="font-weight:700;color:#0f172a;margin-bottom:4px;">Technician Activation</h4>
-        <p style="color:#64748b;font-size:13px;margin-bottom:6px;">Authorized field engineering staff only.</p>
+        <p style="color:#64748b;font-size:13px;margin-bottom:6px;">Authorized technician staff only.</p>
         <div style="background:#fef9c3;color:#713f12;padding:10px 14px;border-radius:10px;font-size:12.5px;margin-bottom:14px;">
           ⚠ You must use the exact email address authorized by your organization manager.
         </div>

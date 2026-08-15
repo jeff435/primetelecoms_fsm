@@ -63,9 +63,8 @@ service cloud.firestore {
     // friendly client-side error message; a malicious client could edit
     // that file, but not this rule. Keep both lists in sync (same
     // email(s), lowercase) and redeploy this file whenever they change.
-    // TODO: replace this placeholder with your real admin email(s).
     function isAllowedAdminEmail(email) {
-      return email in ["admin@primetelecoms.com"];
+      return email in ["printexenginieers@gmail.com"];
     }
 
     // The Supreme Admin approving, rejecting, revoking, or reinstating a

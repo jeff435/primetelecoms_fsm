@@ -26,8 +26,7 @@ const DEFAULT_ORG_ID = "org_primetelecoms";
 // this file. Keep BOTH lists in sync (same email(s), lowercase), and
 // redeploy firestore.rules after changing it.
 //
-// TODO: replace this placeholder with your real admin email/Gmail address.
-const ADMIN_ALLOWED_EMAILS = ["admin@primetelecoms.com"];
+const ADMIN_ALLOWED_EMAILS = ["printexenginieers@gmail.com"];
 
 function uid(prefix) {
   return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -810,6 +809,13 @@ const Auth = {
     const auth = _getAuth();
     const db = _getFirestore();
     if (!auth || !db) throw new Error("Firebase not initialized");
+
+    // Normalize once, up front — the Firestore rules' isAllowedAdminEmail()
+    // does an exact string match with no case-folding, so a phone keyboard
+    // capitalizing the first letter (very common on iOS/Android email
+    // fields) would otherwise make the write silently fail with
+    // permission-denied.
+    email = (email || "").trim().toLowerCase();
 
     if (!Auth.isAllowedAdminEmail(email)) {
       throw new Error("This email isn't authorized to claim Supreme Admin access.");

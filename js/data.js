@@ -741,7 +741,7 @@ const Auth = {
    */
   async managerCreateTechnician(email, password, techData = {}) {
     const me = _currentProfile;
-    if (!me || me.role !== "manager") throw new Error("Only a manager can create a technician account.");
+    if (!me || (me.role !== "manager" && me.role !== "admin")) throw new Error("Only a manager or the Supreme Admin can create a technician account.");
     email = (email || "").trim().toLowerCase();
     if (!email) throw new Error("Technician email is required.");
     if (!password || password.length < 6) throw new Error("Password must be at least 6 characters.");

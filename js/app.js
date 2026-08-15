@@ -4,6 +4,26 @@
 
 const appRoot = document.getElementById("app-root");
 
+// ── Auth race guard ──────────────────────────────────────────────────────
+// Firebase's SDK fires the GLOBAL onAuthStateChanged listener (registered
+// once, below, on boot) the INSTANT an account is created or signed in —
+// at the exact same moment an explicit flow (manager registration,
+// technician activation, customer sign-up, or the Supreme Admin claim)
+// is about to make its OWN call to Auth.loadProfile(fbUser, {role: ...}).
+// Without this guard, both calls run concurrently and race to create the
+// brand-new user's Firestore profile: the global listener's call always
+// asks for the bare default ("customer"), while the explicit flow asks
+// for the real role. Whichever write reaches Firestore first wins as the
+// document's "create" — and firestore.rules never lets a signed-in user
+// change their own role afterwards, so the second write is silently
+// rejected. This is what caused new managers to end up stuck as
+// "customer" and could just as easily leave a freshly-claimed Supreme
+// Admin unable to see the admin dashboard. Every explicit flow below sets
+// this flag before touching Firebase Auth and always clears it (success
+// or failure) once its own loadProfile call has resolved, so the global
+// listener knows to sit out that one transition instead of racing it.
+let _explicitAuthFlow = false;
+
 function toast(message, type = "info") {
   let wrap = document.querySelector(".pt-toast-wrap");
   if (!wrap) {
@@ -234,6 +254,12 @@ window.addEventListener("DOMContentLoaded", () => {
   `;
 
   Auth.onAuthStateChanged(async (firebaseUser) => {
+    // An explicit flow (sign-in, registration, activation, or the admin
+    // claim) is already in the middle of handling this exact transition
+    // itself — see the guard comment above. Sitting out here is what
+    // prevents the double-write race that used to corrupt new accounts'
+    // roles.
+    if (_explicitAuthFlow) return;
     if (firebaseUser) {
       try {
         await Auth.loadProfile(firebaseUser);
@@ -309,6 +335,7 @@ function renderLogin() {
 
   // ── Check for pending Google redirect result ──────────────────────────────
   showInfo("Checking sign-in state…");
+  _explicitAuthFlow = true;
   Auth.checkRedirectResult()
     .then(async (fbUser) => {
       clearMsg();
@@ -322,7 +349,8 @@ function renderLogin() {
     .catch((err) => {
       clearMsg();
       showErr(Auth.getErrorMessage(err.code) || err.message);
-    });
+    })
+    .finally(() => { _explicitAuthFlow = false; });
 
   // ── Email / password sign-in ──────────────────────────────────────────────
   document.getElementById("btn-signin").addEventListener("click", async () => {
@@ -337,6 +365,7 @@ function renderLogin() {
     clearMsg();
 
     try {
+      _explicitAuthFlow = true;
       const fbUser = await Auth.signInWithEmail(email, password);
       await Auth.loadProfile(fbUser);
       navigate("dashboard");
@@ -345,6 +374,8 @@ function renderLogin() {
       btn.disabled    = false;
       btn.textContent = "Sign In";
       showErr(Auth.getErrorMessage(err.code) || err.message);
+    } finally {
+      _explicitAuthFlow = false;
     }
   });
 
@@ -455,6 +486,7 @@ function renderClaimAdmin() {
     btn.textContent = "Claiming access…";
 
     try {
+      _explicitAuthFlow = true;
       const fbUser = await Auth.claimAdmin(email, pw, fname, lname);
       await Auth.loadProfile(fbUser);
       toast("Supreme Admin access claimed. Welcome aboard.", "success");
@@ -464,6 +496,8 @@ function renderClaimAdmin() {
       btn.disabled    = false;
       btn.textContent = "Claim Supreme Admin Access";
       showErr(err.message || "Failed to claim admin access.");
+    } finally {
+      _explicitAuthFlow = false;
     }
   });
 }
@@ -530,6 +564,7 @@ function renderRegister() {
     btn.textContent = "Creating account…";
 
     try {
+      _explicitAuthFlow = true;
       const displayName = `${fname} ${lname}`;
       const fbUser = await Auth.registerWithEmail(email, pw, displayName);
 
@@ -555,6 +590,8 @@ function renderRegister() {
       btn.disabled    = false;
       btn.textContent = "Create Manager Account";
       showErr(Auth.getErrorMessage(err.code) || err.message);
+    } finally {
+      _explicitAuthFlow = false;
     }
   });
 }
@@ -630,6 +667,7 @@ function renderActivateTechnician() {
       }
 
       showInfo("Authorization confirmed — creating your account…");
+      _explicitAuthFlow = true;
 
       // Step 2 — create or sign into Firebase account
       let fbUser;
@@ -677,6 +715,8 @@ function renderActivateTechnician() {
       btn.disabled    = false;
       btn.textContent = "Verify & Activate Account";
       showErr(Auth.getErrorMessage(err.code) || err.message);
+    } finally {
+      _explicitAuthFlow = false;
     }
   });
 }
@@ -745,6 +785,7 @@ function renderCustomerRegister() {
     btn.textContent = "Creating account…";
 
     try {
+      _explicitAuthFlow = true;
       const displayName = `${fname} ${lname}`;
       const fbUser = await Auth.registerWithEmail(email, pw, displayName);
 
@@ -764,6 +805,8 @@ function renderCustomerRegister() {
       btn.disabled    = false;
       btn.textContent = "Create My Account";
       showErr(Auth.getErrorMessage(err.code) || err.message);
+    } finally {
+      _explicitAuthFlow = false;
     }
   });
 }

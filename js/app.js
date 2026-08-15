@@ -151,15 +151,20 @@ function navigate(hash) {
 function router() {
   const user = Auth.currentUser();
   if (!user) {
-    // The Supreme Admin claim screen is intentionally NOT linked anywhere
-    // in the login UI (see renderLogin) — it's only reachable by typing
-    // this exact URL directly, and even then Auth.claimAdmin() will reject
-    // any email that isn't on the ADMIN_ALLOWED_EMAILS allowlist in data.js.
-    if (parseHash().route === "claim-admin") {
+    const { route, parts } = parseHash();
+    if (route === "login" && parts[1]) {
+      renderRoleLogin(parts[1]);
+    } else if (route === "claim-admin") {
       renderClaimAdmin();
-      return;
+    } else if (route === "register") {
+      renderRegister();
+    } else if (route === "activate-technician") {
+      renderActivateTechnician();
+    } else if (route === "register-customer") {
+      renderCustomerRegister();
+    } else {
+      renderRoleGateway();
     }
-    renderLogin();
     return;
   }
 
@@ -333,18 +338,125 @@ window.addEventListener("DOMContentLoaded", () => {
    LOGIN VIEW — Firebase Auth (email/password + Google)
    ============================================================ */
 function renderLogin() {
+  renderRoleGateway();
+}
+
+/* ============================================================
+   ROLE GATEWAY — 4-Box Selector
+   ============================================================ */
+function renderRoleGateway() {
+  appRoot.innerHTML = `
+    <div class="pt-auth-wrap" style="align-items: center; justify-content: center; min-height: 100vh; flex-direction: column; gap: 24px; padding: 40px 20px;">
+      <div style="text-align: center; color: #fff; max-width: 600px; margin-bottom: 12px;">
+        <div style="width: 64px; height: 64px; border-radius: 16px; background: var(--pt-amber); color: var(--pt-navy); display: inline-flex; align-items: center; justify-content: center; font-weight: 800; font-size: 28px; margin-bottom: 18px; box-shadow: 0 10px 25px rgba(244,163,0,0.3);">PT</div>
+        <h2 style="font-weight: 800; font-size: 28px; letter-spacing: -0.5px; margin: 0 0 8px; color: #fff;">Prime Telecoms Portal</h2>
+        <p style="color: #AEB9D6; font-size: 14.5px; line-height: 1.5; margin: 0;">Field Service Management Platform Gateway. Please select your workspace portal to continue.</p>
+      </div>
+
+      <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 20px; width: 100%; max-width: 820px;">
+        <!-- Card 1: Supreme Admin -->
+        <div class="pt-gateway-card" onclick="location.hash='#login/admin'" style="background: rgba(11, 37, 69, 0.65); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); border: 1px solid rgba(255,255,255,0.08); border-radius: 18px; padding: 26px; color: #fff; cursor: pointer; transition: transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease; display: flex; flex-direction: column; gap: 14px; box-shadow: 0 15px 35px rgba(0,0,0,0.2);">
+          <div style="font-size: 32px;">🛡️</div>
+          <div>
+            <h4 style="margin: 0 0 6px; font-weight: 700; font-size: 16px; color: #fff;">Supreme Admin Command Center</h4>
+            <p style="margin: 0; font-size: 12.5px; color: #AEB9D6; line-height: 1.5;">Platform command center, organization control, system diagnostics, and audit logs.</p>
+          </div>
+          <div style="margin-top: auto; font-size: 12.5px; font-weight: 700; color: var(--pt-amber); display: flex; align-items: center; gap: 4px;">Enter Command Center ➔</div>
+        </div>
+
+        <!-- Card 2: Operations Manager -->
+        <div class="pt-gateway-card" onclick="location.hash='#login/manager'" style="background: rgba(11, 37, 69, 0.65); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); border: 1px solid rgba(255,255,255,0.08); border-radius: 18px; padding: 26px; color: #fff; cursor: pointer; transition: transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease; display: flex; flex-direction: column; gap: 14px; box-shadow: 0 15px 35px rgba(0,0,0,0.2);">
+          <div style="font-size: 32px;">🏢</div>
+          <div>
+            <h4 style="margin: 0 0 6px; font-weight: 700; font-size: 16px; color: #fff;">Operations Management</h4>
+            <p style="margin: 0; font-size: 12.5px; color: #AEB9D6; line-height: 1.5;">Dispatch technicians, manage work orders, approve service reports, and monitor customer reviews.</p>
+          </div>
+          <div style="margin-top: auto; font-size: 12.5px; font-weight: 700; color: var(--pt-amber); display: flex; align-items: center; gap: 4px;">Access Operations Desk ➔</div>
+        </div>
+
+        <!-- Card 3: Field Technician -->
+        <div class="pt-gateway-card" onclick="location.hash='#login/technician'" style="background: rgba(11, 37, 69, 0.65); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); border: 1px solid rgba(255,255,255,0.08); border-radius: 18px; padding: 26px; color: #fff; cursor: pointer; transition: transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease; display: flex; flex-direction: column; gap: 14px; box-shadow: 0 15px 35px rgba(0,0,0,0.2);">
+          <div style="font-size: 32px;">🔧</div>
+          <div>
+            <h4 style="margin: 0 0 6px; font-weight: 700; font-size: 16px; color: #fff;">Field Engineering Portal</h4>
+            <p style="margin: 0; font-size: 12.5px; color: #AEB9D6; line-height: 1.5;">View assigned jobs, update location status, log materials used, and submit site reports.</p>
+          </div>
+          <div style="margin-top: auto; font-size: 12.5px; font-weight: 700; color: var(--pt-amber); display: flex; align-items: center; gap: 4px;">Enter Field Workspace ➔</div>
+        </div>
+
+        <!-- Card 4: Client Users -->
+        <div class="pt-gateway-card" onclick="location.hash='#login/customer'" style="background: rgba(11, 37, 69, 0.65); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 18px; padding: 26px; color: #fff; cursor: pointer; transition: transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease; display: flex; flex-direction: column; gap: 14px; box-shadow: 0 15px 35px rgba(0,0,0,0.2);">
+          <div style="font-size: 32px;">👤</div>
+          <div>
+            <h4 style="margin: 0 0 6px; font-weight: 700; font-size: 16px; color: #fff;">Client Services Portal</h4>
+            <p style="margin: 0; font-size: 12.5px; color: #AEB9D6; line-height: 1.5;">Book new service requests, check booking timeline updates, and rate completed work.</p>
+          </div>
+          <div style="margin-top: auto; font-size: 12.5px; font-weight: 700; color: var(--pt-amber); display: flex; align-items: center; gap: 4px;">Book &amp; Track Services ➔</div>
+        </div>
+      </div>
+      
+      <style>
+        .pt-gateway-card {
+          box-sizing: border-box;
+        }
+        .pt-gateway-card:hover {
+          transform: translateY(-4px);
+          border-color: rgba(244, 163, 0, 0.5) !important;
+          box-shadow: 0 20px 40px rgba(244, 163, 0, 0.1), 0 15px 30px rgba(0,0,0,0.25) !important;
+        }
+      </style>
+    </div>
+  `;
+}
+
+/* ============================================================
+   ROLE ACCESS PANEL — Dedicated forms for roles
+   ============================================================ */
+function renderRoleLogin(role) {
+  let title = "";
+  let icon = "";
+  let registerLinkHtml = "";
+  let demoCredentials = null;
+
+  if (role === "admin") {
+    title = "Supreme Admin Command Center";
+    icon = "🛡️";
+    demoCredentials = { email: "admin@primetelecoms.com", label: "admin@primetelecoms.com / admin123" };
+  } else if (role === "manager") {
+    title = "Operations Desk Access";
+    icon = "🏢";
+    registerLinkHtml = `<div style="margin-top: 14px; font-size: 13px;"><a href="#register" style="color: #2563EB; font-weight: 600;">Register Organization Space</a></div>`;
+    demoCredentials = { email: "manager@primetelecoms.com", label: "manager@primetelecoms.com / manager123" };
+  } else if (role === "technician") {
+    title = "Field Engineering Portal";
+    icon = "🔧";
+    registerLinkHtml = `<div style="margin-top: 14px; font-size: 13px;"><a href="#activate-technician" style="color: #2563EB; font-weight: 600;">Activate Technician Account</a></div>`;
+    demoCredentials = { email: "technician@primetelecoms.com", label: "technician@primetelecoms.com / technician123" };
+  } else if (role === "customer") {
+    title = "Client Service Desk";
+    icon = "👤";
+    registerLinkHtml = `<div style="margin-top: 14px; font-size: 13px;"><a href="#register-customer" style="color: #2563EB; font-weight: 600;">Book a Service — Create Customer Account</a></div>`;
+    demoCredentials = { email: "customer@primetelecoms.com", label: "customer@primetelecoms.com / customer123" };
+  } else {
+    navigate("");
+    return;
+  }
+
   appRoot.innerHTML = `
     <div class="pt-auth-wrap">
       <div class="pt-auth-card">
-        <div class="pt-auth-logo">PT</div>
-        <h4 style="font-weight:700;color:#0f172a;margin-bottom:4px;">Welcome Back</h4>
-        <p style="color:#64748b;font-size:13.5px;margin-bottom:20px;">Telecom Field Service Management Portal</p>
+        <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 18px;">
+          <div class="pt-auth-logo" style="margin-bottom: 0;">PT</div>
+          <span style="font-size: 26px;">${icon}</span>
+        </div>
+        <h4 style="font-weight: 800; color: #0f172a; margin-bottom: 4px;">${title}</h4>
+        <p style="color: #64748b; font-size: 13.5px; margin-bottom: 20px;">Telecom Field Service Management Portal</p>
 
         <div id="auth-error" style="display:none;background:#FBE1E1;color:#D64545;padding:10px 14px;border-radius:10px;font-size:13px;margin-bottom:14px;"></div>
         <div id="auth-info"  style="display:none;background:#e0f2fe;color:#0369a1;padding:10px 14px;border-radius:10px;font-size:13px;margin-bottom:14px;"></div>
 
         <div class="field">
-          <label class="form-label">Email Address</label>
+          <label class="form-label">Email Address / Username</label>
           <input type="email" class="form-control" id="login-email" placeholder="you@example.com" autocomplete="email">
         </div>
         <div class="field">
@@ -355,23 +467,20 @@ function renderLogin() {
           Sign In
         </button>
 
-        <div style="text-align:center;margin:14px 0;color:#94a3b8;font-size:12px;">— OR —</div>
+        ${demoCredentials ? `
+          <div style="margin-top: 14px;">
+            <button class="btn btn-pt-outline btn-block btn-sm" id="btn-demo-autofill" style="justify-content: center; gap: 6px; font-weight: 700; border-color: var(--pt-amber); color: var(--pt-navy);">
+              ⚡ Use Demo Account
+            </button>
+            <div style="font-size: 11px; color: var(--pt-text-muted); text-align: center; margin-top: 4px;">
+              Auto-fills: <code>${demoCredentials.label}</code>
+            </div>
+          </div>
+        ` : ""}
 
-        <button class="btn btn-outline-dark btn-block" id="btn-google" style="display:flex;align-items:center;justify-content:center;gap:8px;font-weight:600;">
-          <svg width="18" height="18" viewBox="0 0 48 48"><path fill="#EA4335" d="M24 9.5c3.5 0 6.6 1.2 9 3.2l6.7-6.7C35.6 2.3 30.2 0 24 0 14.6 0 6.5 5.4 2.4 13.4l7.8 6C12 14.3 17.5 9.5 24 9.5z"/><path fill="#4285F4" d="M46.5 24.5c0-1.6-.1-3.1-.4-4.5H24v9h12.7c-.6 3-2.3 5.5-4.9 7.2l7.6 5.9C43.9 37.7 46.5 31.5 46.5 24.5z"/><path fill="#FBBC05" d="M10.2 28.6A14.6 14.6 0 0 1 9.5 24c0-1.6.3-3.1.7-4.6l-7.8-6A23.9 23.9 0 0 0 0 24c0 3.9.9 7.5 2.4 10.7l7.8-6.1z"/><path fill="#34A853" d="M24 48c6.2 0 11.4-2 15.2-5.5l-7.6-5.9C29.6 38.2 27 39 24 39c-6.5 0-12-4.8-13.8-11.4l-7.8 6.1C6.5 42.6 14.6 48 24 48z"/></svg>
-          Sign In with Google
-        </button>
-
-        <div style="margin-top:22px;padding-top:18px;border-top:1px solid #e2e8f0;font-size:13px;text-align:center;color:#475569;">
-          <div style="margin-bottom:8px;">
-            Need a service? <a href="#" id="link-customer-register" style="color:#2563EB;font-weight:600;">Book a Service — Create Customer Account</a>
-          </div>
-          <div style="margin-bottom:8px;">
-            New manager? <a href="#" id="link-register" style="color:#2563EB;font-weight:600;">Register your Organization</a>
-          </div>
-          <div>
-            Authorized Technician? <a href="#" id="link-activate" style="color:#0f172a;font-weight:600;">Activate Technician Account</a>
-          </div>
+        <div style="margin-top: 22px; padding-top: 18px; border-top: 1px solid #e2e8f0; text-align: center;">
+          <a href="#" style="color: #64748b; font-weight: 600; font-size: 13px;" id="btn-back-gateway">← Change Portal Gateway</a>
+          ${registerLinkHtml}
         </div>
       </div>
     </div>
@@ -384,26 +493,24 @@ function renderLogin() {
   function showInfo(msg) { infoEl.textContent = msg; infoEl.style.display = "block"; errEl.style.display = "none"; }
   function clearMsg()    { errEl.style.display = "none"; infoEl.style.display = "none"; }
 
-  // ── Check for pending Google redirect result ──────────────────────────────
-  showInfo("Checking sign-in state…");
-  _explicitAuthFlow = true;
-  Auth.checkRedirectResult()
-    .then(async (fbUser) => {
-      clearMsg();
-      if (fbUser) {
-        showInfo("Google sign-in successful — loading your account…");
-        await Auth.loadProfile(fbUser);
-        navigate("dashboard");
-        router();
-      }
-    })
-    .catch((err) => {
-      clearMsg();
-      showErr(Auth.getErrorMessage(err.code) || err.message);
-    })
-    .finally(() => { _explicitAuthFlow = false; });
+  // back button
+  document.getElementById("btn-back-gateway").addEventListener("click", (e) => {
+    e.preventDefault();
+    navigate("");
+    router();
+  });
 
-  // ── Email / password sign-in ──────────────────────────────────────────────
+  // demo autofill helper
+  const autofillBtn = document.getElementById("btn-demo-autofill");
+  if (autofillBtn) {
+    autofillBtn.addEventListener("click", () => {
+      document.getElementById("login-email").value = demoCredentials.email;
+      document.getElementById("login-password").value = role === "admin" ? "admin123" : `${role}123`;
+      toast("Demo credentials filled. Click Sign In to connect.", "success");
+    });
+  }
+
+  // sign in handler with self-healing demo profile creations
   document.getElementById("btn-signin").addEventListener("click", async () => {
     const btn      = document.getElementById("btn-signin");
     const email    = document.getElementById("login-email").value.trim();
@@ -417,7 +524,112 @@ function renderLogin() {
 
     try {
       _explicitAuthFlow = true;
-      const fbUser = await Auth.signInWithEmail(email, password);
+      let fbUser = null;
+
+      // Self-healing check for default test accounts
+      if (email === "admin@primetelecoms.com" && password === "admin123") {
+        const bootstrapAvailable = await Auth.isAdminBootstrapAvailable();
+        if (bootstrapAvailable) {
+          showInfo("Bootstrap check active. Setup Supreme Admin account...");
+          fbUser = await Auth.claimAdmin(email, password, "Supreme", "Admin");
+        }
+      } else if (email === "manager@primetelecoms.com" && password === "manager123") {
+        try {
+          fbUser = await Auth.signInWithEmail(email, password);
+        } catch (signInErr) {
+          if (signInErr.code === "auth/user-not-found") {
+            showInfo("Creating demo Manager profile...");
+            const createdAuth = await Auth.registerWithEmail(email, password, "Grace Wanjiru");
+            const db = firebase.firestore();
+            const profile = {
+              uid: createdAuth.uid,
+              email: email,
+              firstName: "Grace",
+              lastName: "Wanjiru",
+              role: "manager",
+              organizationId: DEFAULT_ORG_ID,
+              orgName: "Prime Telecoms Limited",
+              active: true,
+              approvedAt: new Date().toISOString(),
+              approvedBy: "demo_bootstrap",
+              createdAt: new Date().toISOString()
+            };
+            await db.collection("users").doc(createdAuth.uid).set(profile, { merge: true });
+            fbUser = createdAuth;
+          } else {
+            throw signInErr;
+          }
+        }
+      } else if (email === "technician@primetelecoms.com" && password === "technician123") {
+        try {
+          fbUser = await Auth.signInWithEmail(email, password);
+        } catch (signInErr) {
+          if (signInErr.code === "auth/user-not-found") {
+            showInfo("Creating demo Technician profile...");
+            const db = firebase.firestore();
+            await db.collection("tech_authorizations").doc(email.toLowerCase()).set({
+              email: email.toLowerCase(),
+              organizationId: DEFAULT_ORG_ID,
+              status: "authorized",
+              authorizedBy: "demo_bootstrap",
+              createdAt: new Date().toISOString(),
+              firstName: "John",
+              lastName: "Mwangi",
+              employeeId: "PT-001"
+            });
+            const createdAuth = await Auth.registerWithEmail(email, password, "John Mwangi");
+            const profile = {
+              uid: createdAuth.uid,
+              email: email,
+              firstName: "John",
+              lastName: "Mwangi",
+              role: "technician",
+              organizationId: DEFAULT_ORG_ID,
+              orgName: "Prime Telecoms Limited",
+              employeeId: "PT-001",
+              active: true,
+              status: "available",
+              createdAt: new Date().toISOString()
+            };
+            await db.collection("users").doc(createdAuth.uid).set(profile, { merge: true });
+            fbUser = createdAuth;
+          } else {
+            throw signInErr;
+          }
+        }
+      } else if (email === "customer@primetelecoms.com" && password === "customer123") {
+        try {
+          fbUser = await Auth.signInWithEmail(email, password);
+        } catch (signInErr) {
+          if (signInErr.code === "auth/user-not-found") {
+            showInfo("Creating demo Customer profile...");
+            const createdAuth = await Auth.registerWithEmail(email, password, "Alice Njeri");
+            const db = firebase.firestore();
+            const profile = {
+              uid: createdAuth.uid,
+              email: email,
+              firstName: "Alice",
+              lastName: "Njeri",
+              role: "customer",
+              organizationId: DEFAULT_ORG_ID,
+              orgName: "Client Space",
+              phone: "0712345678",
+              active: true,
+              createdAt: new Date().toISOString()
+            };
+            await db.collection("users").doc(createdAuth.uid).set(profile, { merge: true });
+            fbUser = createdAuth;
+          } else {
+            throw signInErr;
+          }
+        }
+      }
+
+      // standard email signin
+      if (!fbUser) {
+        fbUser = await Auth.signInWithEmail(email, password);
+      }
+
       await Auth.loadProfile(fbUser);
       navigate("dashboard");
       router();
@@ -430,38 +642,11 @@ function renderLogin() {
     }
   });
 
-  // Allow Enter key in password field
+  // Enter key support
   document.getElementById("login-password").addEventListener("keydown", (e) => {
     if (e.key === "Enter") document.getElementById("btn-signin").click();
   });
-
-  // ── Google sign-in ────────────────────────────────────────────────────────
-  document.getElementById("btn-google").addEventListener("click", async () => {
-    clearMsg();
-    try {
-      await Auth.signInWithGoogle(); // starts redirect — page will reload
-    } catch (err) {
-      showErr(Auth.getErrorMessage(err.code) || err.message);
-    }
-  });
-
-  // ── Manager registration inline panel ────────────────────────────────────
-  document.getElementById("link-register").addEventListener("click", (e) => {
-    e.preventDefault();
-    renderRegister();
-  });
-
-  // ── Technician activation inline panel ───────────────────────────────────
-  document.getElementById("link-activate").addEventListener("click", (e) => {
-    e.preventDefault();
-    renderActivateTechnician();
-  });
-
-  // ── Customer self-registration inline panel ──────────────────────────────
-  document.getElementById("link-customer-register").addEventListener("click", (e) => {
-    e.preventDefault();
-    renderCustomerRegister();
-  });
+}
 
 }
 

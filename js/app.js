@@ -274,9 +274,11 @@ function router() {
       break;
 
     case "staff":
-      // Only managers reach here (guard above) — this is the admin panel
-      // that controls who is granted the technician role.
-      renderStaffList(content, user);
+      // Only managers/admin reach here (guard above) — this is the panel
+      // that controls who is granted the technician role. #staff/:id opens
+      // the per-technician drill-down.
+      if (parts[1]) renderTechnicianDetail(content, user, parts[1]);
+      else renderStaffList(content, user);
       break;
 
     case "reviews":
@@ -1460,6 +1462,7 @@ function renderAdminManagers(el, user) {
               <button class="btn btn-pt-outline btn-sm" data-reset-pw="${escapeHtml(m.email || m.username)}">Reset Email</button>
               <button class="btn btn-pt-outline btn-sm" data-suspend-mgr="${m.id}">Suspend</button>
               <button class="btn btn-danger-outline btn-sm" data-revoke-mgr="${m.id}">Revoke</button>
+              <button class="btn btn-danger-outline btn-sm" data-purge="${m.id}" style="font-weight:700;">Delete</button>
             </td>
           </tr>`;
         }).join("")}
@@ -1479,7 +1482,10 @@ function renderAdminManagers(el, user) {
               ${m.suspendedAt ? '<span class="pt-mgr-badge-suspended">Suspended</span>' : 
                 (m.role === "manager_pending" ? '<span class="pt-mgr-badge-pending">Rejected Request</span>' : '<span class="pt-mgr-badge-revoked">Revoked Access</span>')}
             </td>
-            <td style="text-align:right;"><button class="btn btn-pt-outline btn-sm" data-reinstate="${m.id}">Activate &amp; Reinstate</button></td>
+            <td style="text-align:right;white-space:nowrap;">
+              <button class="btn btn-pt-outline btn-sm" data-reinstate="${m.id}">Activate &amp; Reinstate</button>
+              <button class="btn btn-danger-outline btn-sm" data-purge="${m.id}" style="font-weight:700;">Delete</button>
+            </td>
           </tr>`).join("")}
       </tbody></table></div>` : `<div class="pt-empty-state"><i>&#128100;</i>Nobody has been rejected, suspended, or revoked.</div>`}
     </div>
@@ -1548,6 +1554,9 @@ function renderAdminManagers(el, user) {
       }
     });
   });
+
+  // Permanent deletion — admin-only, and this screen is admin-only already.
+  wirePurgeButtons(el, user.role === "admin");
   el.querySelectorAll("[data-reset-pw]").forEach((btn) => {
     btn.addEventListener("click", async () => {
       const email = btn.getAttribute("data-reset-pw");
@@ -2638,10 +2647,131 @@ function renderReportDetail(el, user, reportId) {
 /* ============================================================
    STAFF: LIST / FORM
    ============================================================ */
+/* ============================================================
+   PERMANENT ACCOUNT DELETION — shared by the Staff page and the
+   Supreme Admin's Manager Control Center.
+
+   Two-step confirmation on purpose: this is the only irreversible
+   destructive action in the whole app, and it takes a person's
+   history with it. The second step also sets expectations about the
+   ONE manual follow-up step the browser genuinely cannot do for you
+   (removing the Firebase Authentication login) — see
+   Users.purgeAccount in data.js for why that limit exists.
+   ============================================================ */
+function wirePurgeButtons(el, isAdminUser) {
+  if (!isAdminUser) return;
+  el.querySelectorAll("[data-purge]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const id = btn.getAttribute("data-purge");
+      const target = Users.get(id);
+      if (!target) return;
+      const name  = Users.fullName(target);
+      const email = (target.email || target.username || "").toLowerCase();
+
+      if (!confirm(
+        `PERMANENTLY DELETE ${name}?\n\n` +
+        `This erases their profile, their stored credentials, and their ` +
+        `technician/manager authorization records. Any jobs still assigned ` +
+        `to them are released back to the pending queue.\n\n` +
+        `This cannot be undone. Continue?`
+      )) return;
+
+      if (!confirm(
+        `Last check — type-free confirmation.\n\n` +
+        `After this, ${email || "this address"} can be authorized again as ` +
+        `either a technician or a manager.\n\n` +
+        `IMPORTANT: their Firebase login itself survives this (a browser ` +
+        `can never delete someone else's login — only a server can). If you ` +
+        `want to recreate them with a NEW password, delete the account in ` +
+        `Firebase Console → Authentication first. Otherwise re-authorize ` +
+        `them and they'll sign in with their existing password.\n\n` +
+        `Delete ${name} now?`
+      )) return;
+
+      btn.disabled = true;
+      btn.textContent = "Deleting…";
+      try {
+        const res = await Users.purgeAccount(id);
+        let msg = `${name} has been permanently deleted.`;
+        if (res.releasedJobs.length) {
+          msg += ` ${res.releasedJobs.length} job(s) returned to the pending queue.`;
+        }
+        toast(msg, "success");
+        if (res.authAccountRemains && email) {
+          setTimeout(() => {
+            toast(`Reminder: remove ${email} in Firebase Console → Authentication to fully free the login.`, "info");
+          }, 600);
+        }
+        router();
+      } catch (err) {
+        toast(err.message || "Couldn't delete this account.", "error");
+        btn.disabled = false;
+        btn.textContent = "Delete";
+      }
+    });
+  });
+}
+
 function renderStaffList(el, user) {
   setPageTitle("Technicians & Staff", "Manage field technician and manager accounts");
   const staff = Users.staff();
+  const isAdminUser = user.role === "admin";
+
+  // ── Workforce analytics ────────────────────────────────────────────────
+  // Derived live from the job/user caches (AdminStats never hits Firestore),
+  // so these stay in sync with everything else on screen automatically.
+  const perf        = AdminStats.technicianPerformance();
+  const allJobs     = Jobs.all();
+  const techsAll    = Users.allTechniciansForAdmin();
+  const activeTechs = techsAll.filter((t) => t.active !== false);
+  const onDuty      = techsAll.filter((t) => AdminStats.technicianStatus(t.id) === "on-duty");
+  const unassigned  = allJobs.filter((j) => j.status === "pending").length;
+  const teamCompleted = perf.reduce((s, t) => s + t.completed.length, 0);
+  const teamRated     = perf.filter((t) => t.avgRating > 0);
+  const teamAvgRating = teamRated.length
+    ? teamRated.reduce((s, t) => s + t.avgRating, 0) / teamRated.length
+    : 0;
+  const avgLoad = activeTechs.length
+    ? (perf.reduce((s, t) => s + t.activeJobs, 0) / activeTechs.length)
+    : 0;
+  const topPerformer = perf.length && perf[0].completed.length ? perf[0] : null;
+  const idleTechs = perf.filter((t) => t.active !== false && t.activeJobs === 0);
+
   el.innerHTML = `
+    <div class="pt-admin-kpi-row" style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px;">
+      <div class="pt-stat-card"><div class="pt-stat-icon pt-icon-blue">&#128101;</div><div>
+        <div class="pt-stat-value">${activeTechs.length}</div>
+        <div class="pt-stat-label">Active Technicians</div>
+        <div class="text-muted" style="font-size:11px;margin-top:2px;">${onDuty.length} on duty now</div>
+      </div></div>
+      <div class="pt-stat-card"><div class="pt-stat-icon pt-icon-green">&#9989;</div><div>
+        <div class="pt-stat-value">${teamCompleted}</div>
+        <div class="pt-stat-label">Jobs Completed</div>
+        <div class="text-muted" style="font-size:11px;margin-top:2px;">team lifetime total</div>
+      </div></div>
+      <div class="pt-stat-card"><div class="pt-stat-icon pt-icon-amber">&#9733;</div><div>
+        <div class="pt-stat-value">${teamAvgRating ? teamAvgRating.toFixed(1) : "—"}</div>
+        <div class="pt-stat-label">Avg Team Rating</div>
+        <div class="text-muted" style="font-size:11px;margin-top:2px;">${teamRated.length} rated technician${teamRated.length === 1 ? "" : "s"}</div>
+      </div></div>
+      <div class="pt-stat-card"><div class="pt-stat-icon pt-icon-blue">&#128202;</div><div>
+        <div class="pt-stat-value">${avgLoad.toFixed(1)}</div>
+        <div class="pt-stat-label">Avg Jobs / Technician</div>
+        <div class="text-muted" style="font-size:11px;margin-top:2px;">${unassigned} still unassigned</div>
+      </div></div>
+    </div>
+
+    ${idleTechs.length || unassigned ? `
+      <div class="pt-card" style="margin-bottom:20px;border-left:4px solid var(--pt-amber);">
+        <div class="pt-card-title" style="font-size:13px;text-transform:uppercase;">Dispatch Insights</div>
+        <div style="font-size:13px;color:var(--pt-text-muted);line-height:1.6;">
+          ${unassigned ? `<div>&#9888;&#65039; <strong>${unassigned}</strong> job${unassigned === 1 ? " is" : "s are"} waiting in the pending queue with nobody assigned.</div>` : ""}
+          ${idleTechs.length ? `<div>&#128100; <strong>${idleTechs.length}</strong> technician${idleTechs.length === 1 ? " has" : "s have"} no active work right now: ${idleTechs.slice(0, 4).map((t) => escapeHtml(Users.fullName(t))).join(", ")}${idleTechs.length > 4 ? ` +${idleTechs.length - 4} more` : ""}.</div>` : ""}
+          ${topPerformer ? `<div>&#127942; Top performer: <strong>${escapeHtml(Users.fullName(topPerformer))}</strong> — ${topPerformer.completed.length} completed, ${topPerformer.compRate}% completion rate.</div>` : ""}
+        </div>
+      </div>
+    ` : ""}
+
     <div class="pt-card" style="max-width:600px;margin-bottom:20px;">
       <div class="pt-card-title">&#128101; Add a Technician</div>
       <p style="font-size:13px;color:#64748b;margin-bottom:14px;">
@@ -2685,29 +2815,44 @@ function renderStaffList(el, user) {
         standard way to get them a new one.
       </p>
       ${staff.length ? `
-      <div class="pt-table-wrap"><table class="pt-table"><thead><tr><th>Name</th><th>Employee ID</th><th>Role</th><th>Phone</th><th>Active Jobs</th><th>Status</th><th></th></tr></thead><tbody>
-        ${staff.map((m) => `
+      <div class="pt-table-wrap"><table class="pt-table"><thead><tr><th>Name</th><th>Employee ID</th><th>Role</th><th>Active Jobs</th><th>Completed</th><th>Rating</th><th>Status</th><th></th></tr></thead><tbody>
+        ${staff.map((m) => {
+          const p = perf.find((x) => x.id === m.id);
+          const liveJobs = Jobs.all().filter((j) => j.assignedTo === m.id && ["assigned", "in_progress"].includes(j.status)).length;
+          return `
           <tr>
-            <td><strong>${escapeHtml(Users.fullName(m))}</strong><br><span class="text-muted" style="font-size:12px;">${escapeHtml(m.username || m.email)}</span></td>
+            <td>
+              ${m.role === "technician"
+                ? `<a href="#staff/${m.id}" style="font-weight:700;color:var(--pt-blue);text-decoration:none;">${escapeHtml(Users.fullName(m))}</a>`
+                : `<strong>${escapeHtml(Users.fullName(m))}</strong>`}
+              <br><span class="text-muted" style="font-size:12px;">${escapeHtml(m.username || m.email)}</span>
+            </td>
             <td>${escapeHtml(m.employeeId) || "—"}</td>
             <td>${LABELS.role[m.role] || m.role}</td>
-            <td>${escapeHtml(m.phone) || "—"}</td>
-            <td>${Jobs.all().filter((j) => j.assignedTo === m.id && ["assigned", "in_progress"].includes(j.status)).length}</td>
+            <td>${liveJobs}</td>
+            <td>${p ? p.completed.length : "—"}${p && p.myJobs.length ? ` <span class="text-muted" style="font-size:11px;">(${p.compRate}%)</span>` : ""}</td>
+            <td>${p && p.avgRating ? `${p.avgRating.toFixed(1)} ★` : `<span class="text-muted">—</span>`}</td>
             <td>${m.active !== false ? `<span class="pt-badge badge-status-completed">Active</span>` : `<span class="pt-badge badge-status-cancelled">Inactive</span>`}</td>
             <td style="text-align:right; white-space:nowrap;">
               ${m.role === "technician" ? `
+                <a class="btn btn-pt-outline btn-sm" href="#staff/${m.id}">View</a>
                 <button class="btn btn-pt-outline btn-sm" data-show-pw="${m.id}">Show Password</button>
                 <button class="btn btn-pt-outline btn-sm" data-reset-pw="${escapeHtml(m.email || m.username)}">Send Reset Email</button>
                 <button class="btn btn-pt-outline btn-sm" data-make-customer="${m.id}">Make Customer</button>
                 <button class="btn btn-danger-outline btn-sm" data-revoke="${escapeHtml(m.email || m.username)}">Revoke</button>
+                ${isAdminUser ? `<button class="btn btn-danger-outline btn-sm" data-purge="${m.id}" style="font-weight:700;">Delete</button>` : ""}
               ` : m.role === "manager" ? `
                 <button class="btn btn-pt-outline btn-sm" data-reset-pw="${escapeHtml(m.email || m.username)}">Send Reset Email</button>
+                ${isAdminUser ? `<button class="btn btn-danger-outline btn-sm" data-purge="${m.id}" style="font-weight:700;">Delete</button>` : ""}
               ` : ""}
             </td>
-          </tr>`).join("")}
+          </tr>`;
+        }).join("")}
       </tbody></table></div>` : `<div class="pt-empty-state"><i>&#128101;</i>No staff members have joined yet. Authorize technicians above to get started.</div>`}
     </div>
   `;
+
+  wirePurgeButtons(el, isAdminUser);
 
   // Reveal the password stored at account-creation time (technicians the
   // manager/admin created directly with a chosen password only — see the
@@ -2864,6 +3009,279 @@ function renderStaffList(el, user) {
 }
 
 /* ============================================================
+   TECHNICIAN DETAIL DRILL-DOWN (#staff/:id)
+   Mirrors the Supreme Admin's manager drill-down, scoped to one
+   technician: profile + access control, performance metrics,
+   job pipeline, and the feedback customers left on their work.
+   ============================================================ */
+function renderTechnicianDetail(el, user, techId) {
+  const tech = Users.get(techId);
+  if (!tech || tech.role !== "technician") {
+    el.innerHTML = `<div class="pt-empty-state"><i>&#128295;</i>Technician not found.</div>`;
+    return;
+  }
+
+  setPageTitle(`Technician Detail — ${Users.fullName(tech)}`, "Individual performance and job history");
+
+  const isAdminUser = user.role === "admin";
+  const jobs      = Jobs.all().filter((j) => j.assignedTo === techId);
+  const completed = jobs.filter((j) => j.status === "completed");
+  const inProg    = jobs.filter((j) => j.status === "in_progress");
+  const assigned  = jobs.filter((j) => j.status === "assigned");
+  const cancelled = jobs.filter((j) => j.status === "cancelled");
+  const compRate  = jobs.length ? Math.round((completed.length / jobs.length) * 100) : 0;
+
+  const rated     = completed.filter((j) => j.rating);
+  const avgRating = rated.length ? rated.reduce((s, j) => s + j.rating, 0) / rated.length : 0;
+
+  // Average time from job start to completion — the clearest single
+  // measure of how long this person's work actually takes on site.
+  const timed = completed.filter((j) => j.startedAt && j.completedAt);
+  const avgMins = timed.length
+    ? Math.round(timed.reduce((s, j) => s + (new Date(j.completedAt) - new Date(j.startedAt)) / 60000, 0) / timed.length)
+    : 0;
+  const avgDuration = avgMins ? (avgMins < 60 ? `${avgMins}m` : `${Math.floor(avgMins / 60)}h ${avgMins % 60}m`) : "—";
+
+  // Work mix by job type, so a manager can see specialisation at a glance.
+  const byType = {};
+  jobs.forEach((j) => { byType[j.jobType] = (byType[j.jobType] || 0) + 1; });
+  const typeRows = Object.entries(byType).sort((a, b) => b[1] - a[1]);
+
+  const status = AdminStats.technicianStatus(techId);
+  const statusMap = {
+    "on-duty":   ["pt-status-on-duty", "On Duty"],
+    "available": ["pt-status-available", "Available"],
+    "on-break":  ["pt-status-on-break", "On Break"],
+    "inactive":  ["pt-status-inactive", "Inactive"],
+    "offline":   ["pt-status-offline", "Offline"],
+  };
+  const [statusClass, statusLbl] = statusMap[status] || ["pt-status-offline", "Offline"];
+
+  const ratingCounts = { 5: 0, 4: 0, 3: 0, 2: 0, 1: 0 };
+  rated.forEach((j) => { ratingCounts[j.rating] = (ratingCounts[j.rating] || 0) + 1; });
+
+  el.innerHTML = `
+    <button class="pt-admin-back" id="btn-back-staff">← Back to Technicians &amp; Staff</button>
+
+    <div class="pt-grid-2">
+      <!-- Left: Profile, access control, work mix -->
+      <div>
+        <div class="pt-card" style="margin-bottom:20px;">
+          <div class="pt-card-title">Technician Profile</div>
+          <div style="display:flex;gap:16px;align-items:center;margin-bottom:16px;">
+            <div class="pt-admin-mgr-avatar" style="width:56px;height:56px;font-size:20px;">${escapeHtml((tech.firstName || tech.email || "?")[0])}</div>
+            <div>
+              <h4 style="margin:0;font-size:17px;font-weight:800;color:var(--pt-navy);">${escapeHtml(Users.fullName(tech))}</h4>
+              <div class="text-muted" style="font-size:13px;">${escapeHtml(tech.email || tech.username)}</div>
+              <div style="margin-top:5px;"><span class="pt-status-badge ${statusClass}">${statusLbl}</span></div>
+            </div>
+          </div>
+
+          <div style="padding:12px 14px;background:var(--pt-bg);border-radius:10px;font-size:13px;">
+            <div style="display:flex;justify-content:space-between;margin-bottom:6px;">
+              <span class="text-muted">Employee ID:</span><strong>${escapeHtml(tech.employeeId) || "—"}</strong>
+            </div>
+            <div style="display:flex;justify-content:space-between;margin-bottom:6px;">
+              <span class="text-muted">Phone:</span><span>${escapeHtml(tech.phone) || "—"}</span>
+            </div>
+            <div style="display:flex;justify-content:space-between;margin-bottom:6px;">
+              <span class="text-muted">Account Status:</span>
+              <strong>${tech.active !== false
+                ? '<span class="pt-mgr-badge-active">Active</span>'
+                : '<span class="pt-mgr-badge-suspended">Revoked</span>'}</strong>
+            </div>
+            <div style="display:flex;justify-content:space-between;">
+              <span class="text-muted">Joined:</span><span>${fmtDate(tech.createdAt)}</span>
+            </div>
+          </div>
+
+          <div class="pt-card-title" style="font-size:13px;text-transform:uppercase;margin:16px 0 8px;">Access Control</div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;">
+            <button class="btn btn-pt-outline btn-sm" id="td-reset">Send Reset Email</button>
+            <button class="btn btn-pt-outline btn-sm" id="td-showpw">Show Password</button>
+            <button class="btn btn-danger-outline btn-sm" id="td-revoke">Revoke Access</button>
+            ${isAdminUser ? `<button class="btn btn-danger-outline btn-sm" data-purge="${tech.id}" style="font-weight:700;">Delete Permanently</button>` : ""}
+          </div>
+        </div>
+
+        <div class="pt-card">
+          <div class="pt-card-title">Work Mix by Job Type</div>
+          ${typeRows.length ? `
+            <div style="display:flex;flex-direction:column;gap:8px;">
+              ${typeRows.map(([type, count]) => {
+                const pct = jobs.length ? Math.round((count / jobs.length) * 100) : 0;
+                return `
+                  <div>
+                    <div style="display:flex;justify-content:space-between;font-size:12.5px;margin-bottom:3px;">
+                      <span style="font-weight:600;">${LABELS.jobType[type] || escapeHtml(type)}</span>
+                      <span class="text-muted">${count} · ${pct}%</span>
+                    </div>
+                    <div class="pt-admin-progress-bar"><div class="pt-admin-progress-fill" style="width:${pct}%;"></div></div>
+                  </div>`;
+              }).join("")}
+            </div>
+          ` : `<div class="pt-empty-state">No jobs assigned yet.</div>`}
+        </div>
+      </div>
+
+      <!-- Right: Performance, pipeline, feedback -->
+      <div>
+        <div class="pt-card" style="margin-bottom:20px;">
+          <div class="pt-card-title">Performance Metrics</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+            <div class="pt-admin-kpi-tile slate" style="padding:14px;">
+              <span style="font-size:20px;">📈</span>
+              <div class="pt-admin-kpi-value" style="font-size:24px;">${compRate}%</div>
+              <div class="pt-admin-kpi-label" style="font-size:10px;">Completion Rate</div>
+              <div class="pt-admin-progress-bar" style="margin-top:8px;">
+                <div class="pt-admin-progress-fill" style="width:${compRate}%;"></div>
+              </div>
+            </div>
+            <div class="pt-admin-kpi-tile amber" style="padding:14px;">
+              <span style="font-size:20px;">⭐️</span>
+              <div class="pt-admin-kpi-value" style="font-size:24px;">${avgRating ? avgRating.toFixed(1) : "—"}</div>
+              <div class="pt-admin-kpi-label" style="font-size:10px;">Average Rating</div>
+              <div style="font-size:10px;color:rgba(255,255,255,0.7);margin-top:8px;">From ${rated.length} review${rated.length === 1 ? "" : "s"}</div>
+            </div>
+          </div>
+          <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:12px;">
+            <div style="background:var(--pt-bg);padding:10px;border-radius:8px;text-align:center;">
+              <div style="font-size:18px;font-weight:800;color:var(--pt-navy);">${jobs.length}</div>
+              <div class="text-muted" style="font-size:11px;">Total Jobs</div>
+            </div>
+            <div style="background:var(--pt-bg);padding:10px;border-radius:8px;text-align:center;">
+              <div style="font-size:18px;font-weight:800;color:var(--pt-navy);">${avgDuration}</div>
+              <div class="text-muted" style="font-size:11px;">Avg On-Site Time</div>
+            </div>
+            <div style="background:var(--pt-bg);padding:10px;border-radius:8px;text-align:center;">
+              <div style="font-size:18px;font-weight:800;color:var(--pt-navy);">${cancelled.length}</div>
+              <div class="text-muted" style="font-size:11px;">Cancelled</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="pt-card" style="margin-bottom:20px;">
+          <div class="pt-card-title">Job Pipeline</div>
+          <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:14px;">
+            <div style="background:var(--pt-bg);padding:10px;border-radius:8px;text-align:center;">
+              <div style="font-size:18px;font-weight:800;color:var(--pt-navy);">${assigned.length}</div>
+              <div class="text-muted" style="font-size:11px;">Assigned</div>
+            </div>
+            <div style="background:var(--pt-bg);padding:10px;border-radius:8px;text-align:center;">
+              <div style="font-size:18px;font-weight:800;color:var(--pt-navy);">${inProg.length}</div>
+              <div class="text-muted" style="font-size:11px;">In Progress</div>
+            </div>
+            <div style="background:var(--pt-bg);padding:10px;border-radius:8px;text-align:center;">
+              <div style="font-size:18px;font-weight:800;color:var(--pt-navy);">${completed.length}</div>
+              <div class="text-muted" style="font-size:11px;">Completed</div>
+            </div>
+          </div>
+
+          <div class="pt-card-title" style="font-size:13px;text-transform:uppercase;margin-bottom:8px;">Recent Jobs</div>
+          ${jobs.length ? `
+            <div class="pt-table-wrap"><table class="pt-table">
+              <thead><tr><th>Job</th><th>Customer</th><th>Status</th><th>Date</th></tr></thead>
+              <tbody>
+                ${jobs.slice(0, 8).map((j) => `
+                  <tr data-goto="#jobs/${j.id}">
+                    <td><strong>${j.jobNumber}</strong><br><span class="text-muted" style="font-size:11px;">${escapeHtml(j.title)}</span></td>
+                    <td>${escapeHtml(j.customerName)}</td>
+                    <td>${jobStatusBadge(j.status)}</td>
+                    <td>${fmtDate(j.completedAt || j.createdAt)}</td>
+                  </tr>`).join("")}
+              </tbody>
+            </table></div>
+          ` : `<div class="pt-empty-state">No jobs assigned to this technician yet.</div>`}
+        </div>
+
+        <div class="pt-card">
+          <div class="pt-card-title">Customer Feedback (${rated.length})</div>
+          ${rated.length ? `
+            <div style="margin-bottom:14px;">
+              ${[5, 4, 3, 2, 1].map((stars) => {
+                const count = ratingCounts[stars] || 0;
+                const pct = rated.length ? Math.round((count / rated.length) * 100) : 0;
+                return `
+                  <div class="pt-rating-dist-row">
+                    <div class="pt-rating-dist-label">${stars} ★</div>
+                    <div class="pt-rating-dist-bar"><div class="pt-rating-dist-fill" style="width:${pct}%;"></div></div>
+                    <div class="pt-rating-dist-count">${count}</div>
+                  </div>`;
+              }).join("")}
+            </div>
+            <div style="display:flex;flex-direction:column;gap:10px;">
+              ${rated.slice(0, 4).map((r) => `
+                <div style="border-bottom:1px solid var(--pt-border);padding-bottom:8px;">
+                  <div style="display:flex;justify-content:space-between;align-items:center;">
+                    <span style="font-size:13px;font-weight:700;">${escapeHtml(r.customerName)}</span>
+                    <span>${starRating(r.rating)}</span>
+                  </div>
+                  <div style="font-size:12px;color:var(--pt-text-muted);margin-top:3px;">
+                    ${r.reviewComment ? escapeHtml(r.reviewComment) : "No comment left."}
+                  </div>
+                  <div style="font-size:10px;color:var(--pt-text-muted);margin-top:4px;text-align:right;">${fmtDate(r.reviewedAt)}</div>
+                </div>`).join("")}
+            </div>
+          ` : `<div class="pt-empty-state">No customer reviews for this technician yet.</div>`}
+        </div>
+      </div>
+    </div>
+  `;
+
+  document.getElementById("btn-back-staff").addEventListener("click", () => {
+    navigate("staff");
+    router();
+  });
+
+  const techEmail = (tech.email || tech.username || "").toLowerCase();
+
+  document.getElementById("td-reset").addEventListener("click", async (e) => {
+    e.target.disabled = true;
+    try {
+      await Auth.sendPasswordReset(techEmail);
+      toast(`Password reset email sent to ${techEmail}.`, "success");
+    } catch (err) {
+      toast(Auth.getErrorMessage(err.code) || err.message, "error");
+    } finally { e.target.disabled = false; }
+  });
+
+  document.getElementById("td-showpw").addEventListener("click", async (e) => {
+    e.target.disabled = true;
+    try {
+      const rec = await Auth.getStoredPassword(tech.id);
+      if (!rec || !rec.lastKnownPassword) {
+        toast("No stored password on file — this account self-activated or has changed its password since. Use \"Send Reset Email\" instead.", "info");
+        return;
+      }
+      const copy = confirm(
+        `Password set at account creation (by ${rec.setByName || "a manager"} on ${rec.setAt ? fmtDateTime(rec.setAt) : "an earlier date"}):\n\n${rec.lastKnownPassword}\n\n` +
+        `If they've changed it since, this will no longer work.\n\nClick OK to copy it.`
+      );
+      if (copy && navigator.clipboard) navigator.clipboard.writeText(rec.lastKnownPassword).catch(() => {});
+    } catch (err) {
+      toast(err.message || "Couldn't load the stored password.", "error");
+    } finally { e.target.disabled = false; }
+  });
+
+  document.getElementById("td-revoke").addEventListener("click", async (e) => {
+    if (!confirm(`Revoke technician access for ${techEmail}? They will no longer be able to sign in as staff.`)) return;
+    e.target.disabled = true;
+    try {
+      await Auth.revokeTechnician(techEmail);
+      Users.update(tech.id, { active: false });
+      toast(`Access revoked for ${techEmail}.`, "success");
+      router();
+    } catch (err) {
+      toast(err.message || "Failed to revoke access.", "error");
+      e.target.disabled = false;
+    }
+  });
+
+  wirePurgeButtons(el, isAdminUser);
+  attachRowNav(el);
+}
+
+/* ============================================================
    REVIEWS (manager-only: every customer review, org-wide)
    ============================================================ */
 function renderReviewsList(el, user) {
@@ -2907,7 +3325,7 @@ function renderCustomersList(el, user) {
     <div class="pt-card">
       <div class="pt-card-title">Registered Customers (${customers.length})</div>
       ${customers.length ? `
-      <div class="pt-table-wrap"><table class="pt-table"><thead><tr><th>Name</th><th>Contact</th><th>Requests</th><th>Registered</th><th>Role</th><th></th></tr></thead><tbody>
+      <div class="pt-table-wrap"><table class="pt-table"><thead><tr><th>Name</th><th>Contact</th><th>Requests</th><th>Registered</th><th>Role</th></tr></thead><tbody>
         ${customers.map((c) => `
           <tr>
             <td><strong>${escapeHtml(Users.fullName(c))}</strong></td>
@@ -2915,32 +3333,16 @@ function renderCustomersList(el, user) {
             <td>${jobs.filter((j) => j.customerId === c.id).length}</td>
             <td>${c.createdAt ? fmtDate(c.createdAt) : "—"}</td>
             <td><span class="pt-badge badge-status-completed">Customer</span></td>
-            <td style="text-align:right; white-space:nowrap;">
-              <button class="btn btn-pt-outline btn-sm" data-make-tech="${c.id}">Make Technician</button>
-            </td>
           </tr>`).join("")}
       </tbody></table></div>` : `<div class="pt-empty-state"><i>&#128100;</i>No customers have registered yet.</div>`}
     </div>
   `;
-
-  el.querySelectorAll("[data-make-tech]").forEach((btn) => {
-    btn.addEventListener("click", async () => {
-      const id = btn.getAttribute("data-make-tech");
-      const c = customers.find((cust) => cust.id === id);
-      if (!c) return;
-      if (!confirm(`Grant technician access to ${Users.fullName(c)}? They'll be able to see and update jobs assigned to them, and will appear in the technician assignment dropdown immediately.`)) return;
-      btn.disabled = true;
-      btn.textContent = "Updating…";
-      try {
-        await Users.changeRole(id, "technician");
-        toast(`${Users.fullName(c)} is now a technician.`, "success");
-      } catch (err) {
-        toast(err.message || "Failed to change role.", "error");
-        btn.disabled = false;
-        btn.textContent = "Make Technician";
-      }
-    });
-  });
+  // The "Make Technician" control that used to live here has been removed
+  // deliberately: technician accounts are provisioned top-down via
+  // "Add a Technician" on the Staff page (which writes the
+  // tech_authorizations record the rules require), never by promoting a
+  // self-registered customer account in place. Customers self-register;
+  // staff are appointed.
 }
 
 /* ============================================================
@@ -3007,6 +3409,36 @@ function renderAdminManagerDetail(el, user, managerId) {
   const mgrReviews = reviews;
   const avgRating = mgrReviews.length ? (mgrReviews.reduce((s, j) => s + j.rating, 0) / mgrReviews.length) : 0;
 
+  // ── Extended operational analytics ──────────────────────────────────────
+  // Average end-to-end job duration across everything this org completed.
+  const mgrTimed = completed.filter((j) => j.startedAt && j.completedAt);
+  const mgrAvgMins = mgrTimed.length
+    ? Math.round(mgrTimed.reduce((s, j) => s + (new Date(j.completedAt) - new Date(j.startedAt)) / 60000, 0) / mgrTimed.length)
+    : 0;
+  const mgrAvgDuration = mgrAvgMins
+    ? (mgrAvgMins < 60 ? `${mgrAvgMins}m` : `${Math.floor(mgrAvgMins / 60)}h ${mgrAvgMins % 60}m`)
+    : "—";
+
+  // Jobs sitting unassigned for more than 48h — the clearest early warning
+  // that dispatch is falling behind.
+  const STALE_MS = 48 * 60 * 60 * 1000;
+  const unassignedAging = pending.filter(
+    (j) => j.createdAt && (Date.now() - new Date(j.createdAt).getTime()) > STALE_MS
+  ).length;
+
+  // Share of reviews at 4★ or better — a more honest read than the mean,
+  // which a couple of outliers can distort on small samples.
+  const happy = mgrReviews.filter((j) => j.rating >= 4).length;
+  const satisfactionRate = mgrReviews.length ? Math.round((happy / mgrReviews.length) * 100) : 0;
+
+  // Per-technician load, used for the utilisation bars below.
+  const techLoad = AdminStats.technicianPerformance().filter((t) => t.active !== false);
+  const maxLoad = techLoad.reduce((m, t) => Math.max(m, t.activeJobs), 0);
+  const meanLoad = techLoad.length ? techLoad.reduce((s, t) => s + t.activeJobs, 0) / techLoad.length : 0;
+  // "Overloaded" = carrying at least twice the team average AND more than
+  // one job, so a team where everyone has 1 job never trips the warning.
+  const overloaded = techLoad.filter((t) => t.activeJobs > 1 && meanLoad > 0 && t.activeJobs >= meanLoad * 2);
+
   // Render HTML
   el.innerHTML = `
     <button class="pt-admin-back" id="btn-back-mgrs">← Back to Command Center</button>
@@ -3047,7 +3479,7 @@ function renderAdminManagerDetail(el, user, managerId) {
           </div>
 
           <div class="pt-card-title" style="font-size: 13px; text-transform: uppercase; margin-bottom: 8px;">Access Control</div>
-          <div class="pt-admin-mgr-actions" style="display: flex; gap: 8px;">
+          <div class="pt-admin-mgr-actions" style="display: flex; gap: 8px; flex-wrap: wrap;">
             ${manager.role === "manager_pending" && manager.active !== false ? `
               <button class="btn btn-pt-primary btn-sm" id="detail-approve">Approve</button>
               <button class="btn btn-danger-outline btn-sm" id="detail-reject">Reject</button>
@@ -3057,6 +3489,7 @@ function renderAdminManagerDetail(el, user, managerId) {
             ` : `
               <button class="btn btn-pt-primary btn-sm" id="detail-reinstate">Activate / Reinstate</button>
             `}
+            <button class="btn btn-danger-outline btn-sm" data-purge="${manager.id}" style="font-weight:700;">Delete Permanently</button>
           </div>
         </div>
 
@@ -3126,6 +3559,45 @@ function renderAdminManagerDetail(el, user, managerId) {
               <div style="font-size: 10px; color: rgba(255,255,255,0.7); margin-top: 8px;">From ${mgrReviews.length} reviews</div>
             </div>
           </div>
+
+          <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:12px;">
+            <div style="background:var(--pt-bg);padding:10px;border-radius:8px;text-align:center;">
+              <div style="font-size:18px;font-weight:800;color:var(--pt-navy);">${mgrAvgDuration}</div>
+              <div class="text-muted" style="font-size:11px;">Avg Job Duration</div>
+            </div>
+            <div style="background:var(--pt-bg);padding:10px;border-radius:8px;text-align:center;">
+              <div style="font-size:18px;font-weight:800;color:${unassignedAging ? "var(--pt-danger)" : "var(--pt-navy)"};">${unassignedAging}</div>
+              <div class="text-muted" style="font-size:11px;">Stale Unassigned</div>
+            </div>
+            <div style="background:var(--pt-bg);padding:10px;border-radius:8px;text-align:center;">
+              <div style="font-size:18px;font-weight:800;color:var(--pt-navy);">${satisfactionRate}%</div>
+              <div class="text-muted" style="font-size:11px;">4★+ Satisfaction</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Team Utilisation -->
+        <div class="pt-card" style="margin-bottom: 20px;">
+          <div class="pt-card-title">Team Utilisation</div>
+          ${techLoad.length ? `
+            <div style="display:flex;flex-direction:column;gap:10px;">
+              ${techLoad.slice(0, 6).map((t) => {
+                const share = maxLoad ? Math.round((t.activeJobs / maxLoad) * 100) : 0;
+                return `
+                  <div>
+                    <div style="display:flex;justify-content:space-between;font-size:12.5px;margin-bottom:3px;">
+                      <a href="#staff/${t.id}" style="font-weight:600;color:var(--pt-blue);text-decoration:none;">${escapeHtml(Users.fullName(t))}</a>
+                      <span class="text-muted">${t.activeJobs} active · ${t.completed.length} done</span>
+                    </div>
+                    <div class="pt-admin-progress-bar"><div class="pt-admin-progress-fill" style="width:${share}%;"></div></div>
+                  </div>`;
+              }).join("")}
+            </div>
+            ${overloaded.length ? `
+              <div style="margin-top:12px;padding:10px;background:#fffbeb;border:1px solid #fde68a;border-radius:8px;font-size:12px;color:#b45309;">
+                &#9888;&#65039; Uneven load: ${overloaded.map((t) => escapeHtml(Users.fullName(t))).join(", ")} ${overloaded.length === 1 ? "is" : "are"} carrying noticeably more active work than the team average.
+              </div>` : ""}
+          ` : `<div class="pt-empty-state">No technicians to analyse yet.</div>`}
         </div>
 
         <!-- Job Pipeline -->
@@ -3237,6 +3709,7 @@ function renderAdminManagerDetail(el, user, managerId) {
   setupBtn("detail-revoke", "revoke", "revoked");
   setupBtn("detail-reinstate", "reinstate", "reinstated");
 
+  wirePurgeButtons(el, user.role === "admin");
   attachRowNav(el);
 }
 

@@ -277,6 +277,14 @@ const Users = {
     if (!["customer", "technician"].includes(newRole)) {
       throw new Error("Role must be either 'customer' or 'technician'.");
     }
+    // Promoting a customer INTO the technician role has been removed from
+    // the product (the "Make Technician" button on the Customers page is
+    // gone). Technicians are provisioned deliberately via "Add a
+    // Technician", which writes the tech_authorizations record. Only the
+    // downgrade direction (technician -> customer) still runs through here.
+    if (newRole === "technician") {
+      throw new Error("Technician access is granted via \"Add a Technician\" on the Staff page, not by promoting a customer account.");
+    }
     const db = _getFirestore();
     if (!db) throw new Error("Firestore not available");
     const target = Users.get(userId);
@@ -346,6 +354,109 @@ const Users = {
   /** Returns ALL technicians (including inactive) — for admin roster only. */
   allTechniciansForAdmin() {
     return _orgUsersCache.filter((u) => u.role === "technician");
+  },
+
+  /**
+   * Supreme-Admin-only: permanently erase a technician's or manager's
+   * entire footprint from the system.
+   *
+   * IMPORTANT — what this can and cannot do:
+   *   CAN  delete the Firestore profile (/users/{uid})
+   *   CAN  delete their stored credential record (/users/{uid}/private/*)
+   *   CAN  delete the authorization ledger entries that gate their role
+   *        (/tech_authorizations/{email}, /manager_authorizations/{email})
+   *   CAN  release any jobs still assigned to them back to the pending queue
+   *   CANNOT delete their Firebase AUTHENTICATION account
+   *
+   * That last one is a hard platform limit, not an oversight: the Firebase
+   * Web SDK only ever lets a signed-in user delete THEMSELVES. Deleting
+   * somebody else's Auth account requires the Firebase Admin SDK, which
+   * can only run on a trusted server (Cloud Functions) — never in a
+   * browser, because shipping that power to a client would mean anyone who
+   * opened devtools could delete any account they liked.
+   *
+   * This is exactly why re-registering a deleted person hit
+   * "email already exists": the profile was gone, but the Auth login was
+   * still there. Deleting the authorization records here is what makes the
+   * email genuinely reusable — see purgeResult.authAccountRemains, which
+   * the UI uses to tell the admin the one manual step still required.
+   */
+  async purgeAccount(userId) {
+    const db = _getFirestore();
+    if (!db) throw new Error("Firestore not available");
+    const me = _currentProfile;
+    if (!me || me.role !== "admin") {
+      throw new Error("Only the Supreme Admin can permanently delete an account.");
+    }
+    if (me.id === userId) {
+      throw new Error("You can't delete your own Supreme Admin account.");
+    }
+
+    const target = Users.get(userId);
+    if (!target) throw new Error("Account not found.");
+    if (target.role === "admin") {
+      throw new Error("The Supreme Admin account can't be deleted from here.");
+    }
+
+    const email = (target.email || target.username || "").toLowerCase();
+    const releasedJobs = [];
+
+    // 1 — Release any live jobs so deleting a person never orphans work.
+    //     Assigned/in-progress jobs go back to the unassigned pending queue
+    //     rather than silently pointing at a user document that no longer
+    //     exists (which would render as "Unassigned" but stay un-actionable).
+    const theirJobs = Jobs.all().filter(
+      (j) => j.assignedTo === userId && ["assigned", "in_progress"].includes(j.status)
+    );
+    for (const j of theirJobs) {
+      try {
+        await db.collection("jobs").doc(j.id).set({
+          assignedTo: null,
+          status: "pending",
+          releasedAt: new Date().toISOString(),
+          releasedReason: "Assigned staff account was deleted",
+        }, { merge: true });
+        releasedJobs.push(j.jobNumber || j.id);
+      } catch (e) {
+        console.error("[Users.purgeAccount] job release failed:", j.id, e);
+      }
+    }
+
+    // 2 — Delete the stored credential record in the private subcollection.
+    try {
+      await db.collection("users").doc(userId).collection("private").doc("credentials").delete();
+    } catch (e) {
+      // Non-fatal: many accounts never had one written (self-activated users).
+      console.warn("[Users.purgeAccount] no private credentials to delete:", e.message);
+    }
+
+    // 3 — Delete BOTH authorization ledger entries. This is the step that
+    //     actually frees the email for a future registration request: with
+    //     no ledger entry, the person is simply unknown to the system again
+    //     and can be authorized fresh as either a technician or a manager.
+    if (email) {
+      try { await db.collection("tech_authorizations").doc(email).delete(); }
+      catch (e) { console.warn("[Users.purgeAccount] tech_authorizations delete:", e.message); }
+      try { await db.collection("manager_authorizations").doc(email).delete(); }
+      catch (e) { console.warn("[Users.purgeAccount] manager_authorizations delete:", e.message); }
+    }
+
+    // 4 — Finally the profile document itself.
+    await db.collection("users").doc(userId).delete();
+
+    // Drop it from the local cache immediately so the table updates without
+    // waiting for the onSnapshot round-trip.
+    _orgUsersCache = _orgUsersCache.filter((u) => u.id !== userId);
+    _customersCache = _customersCache.filter((u) => u.id !== userId);
+    _emitDataChanged();
+
+    return {
+      email,
+      releasedJobs,
+      // Always true — see the block comment above for why the browser can
+      // never remove someone else's Auth account.
+      authAccountRemains: true,
+    };
   },
 };
 
@@ -1163,7 +1274,7 @@ const Auth = {
       "auth/wrong-password":         "Incorrect password.",
       "auth/invalid-credential":     "Invalid email or password.",
       "auth/invalid-email":          "Please enter a valid email address.",
-      "auth/email-already-in-use":   "An account with this email already exists. Please sign in instead.",
+      "auth/email-already-in-use":   "A Firebase login already exists for this email. Deleting someone from this app removes their profile and permissions, but a browser can never delete their actual login — only a server can. To reuse this email with a NEW password, delete it in Firebase Console → Authentication first. To reuse it with their EXISTING password, leave the password field blank here to authorize the email instead, and they'll sign in with the password they already have.",
       "auth/weak-password":          "Password must be at least 6 characters.",
       "auth/user-disabled":          "This account has been disabled. Contact your manager.",
       "auth/too-many-requests":      "Too many failed attempts. Please wait before trying again.",

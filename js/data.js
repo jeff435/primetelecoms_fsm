@@ -187,13 +187,17 @@ function startOrgListeners(orgId) {
     (e) => _reportListenerError("Reports", e)
   );
 
-  // Managers + technicians only (customers are excluded from the staff roster)
+  // Every non-customer role (manager, manager_pending, technician, admin) —
+  // customers are excluded and kept in their own cache below. Broadened
+  // from "manager + technician only" so the Supreme Admin dashboard has
+  // pending/active managers and the admin roster available locally too,
+  // without opening a second live listener for the same collection.
   _unsubUsers = db.collection("users").where("organizationId", "==", orgId)
     .onSnapshot(
       (snap) => {
         _orgUsersCache = snap.docs
           .map((d) => ({ id: d.id, ...d.data() }))
-          .filter((u) => u.role === "manager" || u.role === "technician");
+          .filter((u) => u.role !== "customer");
         _emitDataChanged();
       },
       (e) => _reportListenerError("Technicians & Staff", e)
@@ -223,6 +227,17 @@ const Users = {
   },
   technicians: () => _orgUsersCache.filter((u) => u.role === "technician" && u.active !== false),
   customers: () => _customersCache,
+  // Manager + technician roster shown on the Staff page — deliberately
+  // excludes manager_pending/admin/rejected accounts, which live on the
+  // Supreme Admin's own Manager Approvals screen instead.
+  staff: () => _orgUsersCache.filter((u) => u.role === "manager" || u.role === "technician"),
+  managers: () => _orgUsersCache.filter((u) => u.role === "manager" && u.active !== false),
+  pendingManagers: () => _orgUsersCache.filter((u) => u.role === "manager_pending" && u.active !== false),
+  // Both a rejected pending request (role stayed manager_pending) and a
+  // revoked former manager (role stayed manager) land here — both are
+  // "not currently allowed in", both offer the same Reinstate action.
+  rejectedManagers: () => _orgUsersCache.filter((u) => (u.role === "manager_pending" || u.role === "manager") && u.active === false),
+  admins: () => _orgUsersCache.filter((u) => u.role === "admin"),
   fullName: (u) => (u ? (`${u.firstName || ""} ${u.lastName || ""}`.trim() || u.email || u.username || "Unknown") : "Unassigned"),
   update(id, patch) {
     _orgUsersCache = _orgUsersCache.map((u) => (u.id === id ? { ...u, ...patch } : u));
@@ -276,6 +291,37 @@ const Users = {
         await Auth.revokeTechnician(email);
       }
     }
+  },
+
+  /**
+   * Supreme Admin-only: decide a manager account. This is the ONLY way a
+   * self-registered "manager_pending" profile ever becomes a working
+   * "manager" — enforced again server-side by isAdminManagerDecision() in
+   * firestore.rules, so a tampered client request is rejected too.
+   *   - "approve"    manager_pending -> manager, active: true
+   *   - "reject"     manager_pending stays, active: false (blocked)
+   *   - "revoke"     manager stays,         active: false (blocked)
+   *   - "reinstate"  active: true again (role — pending or manager — is untouched)
+   */
+  async setManagerStatus(userId, action) {
+    const db = _getFirestore();
+    if (!db) throw new Error("Firestore not available");
+    const me = _currentProfile;
+    if (!me || me.role !== "admin") throw new Error("Only the Supreme Admin can manage manager accounts.");
+    const now = new Date().toISOString();
+    const patch = {};
+    if (action === "approve") {
+      patch.role = "manager"; patch.active = true; patch.approvedAt = now; patch.approvedBy = me.id;
+    } else if (action === "reject") {
+      patch.active = false; patch.rejectedAt = now; patch.rejectedBy = me.id;
+    } else if (action === "revoke") {
+      patch.active = false; patch.revokedAt = now; patch.revokedBy = me.id;
+    } else if (action === "reinstate") {
+      patch.active = true; patch.reinstatedAt = now; patch.reinstatedBy = me.id;
+    } else {
+      throw new Error("Unknown manager action.");
+    }
+    await db.collection("users").doc(userId).set(patch, { merge: true });
   },
 };
 
@@ -524,6 +570,93 @@ const Auth = {
     }
   },
 
+  /**
+   * Sends Firebase's built-in password-reset email — the secure, standard
+   * way to give someone a new password without anyone (including a
+   * manager or admin) ever needing to know or handle it. This is the only
+   * password path available for an account that DIDN'T have its password
+   * chosen by a manager/admin at creation (see managerCreateTechnician),
+   * since Firebase Authentication only ever stores a one-way hash — there
+   * is no API, client or admin, that can retrieve or set an arbitrary new
+   * password for an existing account without the account holder present.
+   */
+  async sendPasswordReset(email) {
+    const auth = _getAuth();
+    if (!auth) throw new Error("Firebase Auth not initialized");
+    await auth.sendPasswordResetEmail(email);
+  },
+
+  /** Whether the one-time Supreme Admin claim is still unclaimed. */
+  async isAdminBootstrapAvailable() {
+    const db = _getFirestore();
+    if (!db) return false;
+    try {
+      const doc = await db.collection("meta").doc("adminBootstrap").get();
+      return !doc.exists || doc.data().claimed !== true;
+    } catch (e) {
+      console.error("[Auth] adminBootstrap check failed:", e);
+      return false;
+    }
+  },
+
+  /**
+   * One-time claim of the Supreme Admin role. Creates a brand-new Firebase
+   * Auth account and, in a single Firestore transaction, both (a) writes
+   * its profile with role "admin" and (b) flips /meta/adminBootstrap to
+   * claimed — see firestore.rules for why this pair is what makes the
+   * claim safe even if two people click it at the exact same instant:
+   * Firestore detects the conflicting write to the SAME bootstrap doc and
+   * silently retries the loser, which then sees claimed:true and aborts.
+   * If that happens, the just-created Auth account is deleted again so no
+   * orphaned account is left behind.
+   */
+  async claimAdmin(email, password, firstName, lastName) {
+    const auth = _getAuth();
+    const db = _getFirestore();
+    if (!auth || !db) throw new Error("Firebase not initialized");
+
+    const available = await Auth.isAdminBootstrapAvailable();
+    if (!available) throw new Error("Supreme Admin access has already been claimed for this deployment. Please sign in normally.");
+
+    const cred = await auth.createUserWithEmailAndPassword(email, password);
+    const displayName = `${firstName || ""} ${lastName || ""}`.trim();
+    if (displayName) await cred.user.updateProfile({ displayName });
+
+    const profile = {
+      uid: cred.user.uid,
+      email,
+      firstName: firstName || "",
+      lastName: lastName || "",
+      role: "admin",
+      organizationId: DEFAULT_ORG_ID,
+      orgName: "Prime Telecoms Limited",
+      active: true,
+      createdAt: new Date().toISOString(),
+    };
+
+    try {
+      await db.runTransaction(async (tx) => {
+        const metaRef = db.collection("meta").doc("adminBootstrap");
+        const metaSnap = await tx.get(metaRef);
+        if (metaSnap.exists && metaSnap.data().claimed) {
+          throw new Error("ALREADY_CLAIMED");
+        }
+        tx.set(metaRef, { claimed: true, claimedBy: cred.user.uid, claimedAt: new Date().toISOString() });
+        tx.set(db.collection("users").doc(cred.user.uid), profile);
+      });
+    } catch (err) {
+      // Lost the race, or some other failure — don't leave an orphaned
+      // Auth account with no matching profile behind.
+      await cred.user.delete().catch(() => {});
+      if (err.message === "ALREADY_CLAIMED") {
+        throw new Error("Someone else just claimed Supreme Admin access. Please sign in normally.");
+      }
+      throw err;
+    }
+
+    return cred.user;
+  },
+
   /** Sign out of Firebase and clear in-memory profile + live listeners. */
   async signOut() {
     _currentProfile = null;
@@ -660,11 +793,42 @@ const Auth = {
         createdAt: new Date().toISOString(),
       };
       await secDb.collection("users").doc(cred.user.uid).set(profile, { merge: true });
+      // Stash the password the manager/admin just chose, in the private
+      // subcollection (never the /users doc itself — see firestore.rules)
+      // so it can be shown back to a manager/admin later. This is the ONE
+      // password this system can ever honestly display: it's only valid
+      // until the technician changes it themselves, at which point
+      // Firebase makes it unrecoverable again, same as any account.
+      await secDb.collection("users").doc(cred.user.uid).collection("private").doc("credentials").set({
+        lastKnownPassword: password,
+        setAt: new Date().toISOString(),
+        setBy: me.id,
+        setByName: Users.fullName(me),
+      });
       return { id: cred.user.uid, ...profile };
     } finally {
       // Always sign the secondary session back out, success or failure —
       // it must never linger as a second live session.
       await secAuth.signOut().catch(() => {});
+    }
+  },
+
+  /**
+   * Fetch the password stored for an account at creation time (see
+   * managerCreateTechnician above), if any. Returns null if none was ever
+   * stored — most commonly because the account self-registered (a
+   * manager, or a technician who activated via their own link rather than
+   * having a manager set their password directly).
+   */
+  async getStoredPassword(userId) {
+    const db = _getFirestore();
+    if (!db) return null;
+    try {
+      const doc = await db.collection("users").doc(userId).collection("private").doc("credentials").get();
+      return doc.exists ? doc.data() : null;
+    } catch (e) {
+      console.error("[Auth] getStoredPassword failed:", e);
+      return null;
     }
   },
 
@@ -711,5 +875,11 @@ const LABELS = {
     in_progress: "In Progress", completed: "Completed", cancelled: "Cancelled",
   },
   reportStatus: { submitted: "Submitted", reviewed: "Reviewed", approved: "Approved" },
-  role: { manager: "Operations Manager", technician: "Field Technician", customer: "Customer" },
+  role: {
+    admin: "Supreme Admin",
+    manager: "Operations Manager",
+    manager_pending: "Manager (Pending Approval)",
+    technician: "Field Technician",
+    customer: "Customer",
+  },
 };

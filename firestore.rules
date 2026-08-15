@@ -22,7 +22,11 @@ service cloud.firestore {
     function myOrg() {
       return myProfile().organizationId;
     }
-    function isManager()    { return isAuth() && myRole() == "manager"; }
+    // A manager only counts as "manager" for access purposes while their
+    // profile is active — this is what makes the Supreme Admin's "Revoke
+    // Access" control take effect immediately for a manager, exactly the
+    // same way active==false already does for technicians below.
+    function isManager()    { return isAuth() && myRole() == "manager" && myProfile().active != false; }
     // A technician only counts as "technician" for access purposes while
     // their profile is active. This is what makes "Revoke Technician
     // Access" actually take effect immediately (their Firebase Auth
@@ -30,6 +34,45 @@ service cloud.firestore {
     // makes every job/report rule below fail closed for them at once).
     function isTechnician() { return isAuth() && myRole() == "technician" && myProfile().active != false; }
     function isCustomer()   { return isAuth() && myRole() == "customer"; }
+    // The Supreme Admin — one per deployment (see /meta/adminBootstrap
+    // below for the one-time claim that establishes this). Has every
+    // manager power PLUS the sole ability to approve/reject/revoke
+    // manager accounts.
+    function isAdmin()      { return isAuth() && myRole() == "admin" && myProfile().active != false; }
+    // Everywhere a manager could act, the admin can act too — this is the
+    // single switch that broadens jobs/reports/tech_authorizations/staff
+    // management to the admin role without duplicating every rule below.
+    function isManagerLike() { return isManager() || isAdmin(); }
+    // A newly self-registered manager sits here — created, but with none
+    // of a manager's access — until the Supreme Admin approves them (see
+    // isAdminManagerDecision() below, the only path that can move them
+    // out of this role and into "manager").
+    function isPendingManager() { return isAuth() && myRole() == "manager_pending"; }
+
+    // Whether the one-time Supreme Admin claim is still available. Reads
+    // the singleton /meta/adminBootstrap doc; treated as available if the
+    // doc doesn't exist yet (nobody has claimed it) or explicitly says so.
+    function adminBootstrapAvailable() {
+      return !exists(/databases/$(database)/documents/meta/adminBootstrap)
+          || get(/databases/$(database)/documents/meta/adminBootstrap).data.claimed != true;
+    }
+
+    // The Supreme Admin approving, rejecting, revoking, or reinstating a
+    // manager account. This is the ONLY path that can move a profile
+    // between "manager_pending" and "manager" (in either direction) —
+    // ordinary self-registration can create a manager_pending profile,
+    // but nothing except this admin decision can turn it into a working
+    // manager account. organizationId can never move; nothing but the
+    // decision fields themselves can move alongside role/active.
+    function isAdminManagerDecision() {
+      return isAdmin()
+          && resource.data.role in ["manager_pending", "manager"]
+          && request.resource.data.role in ["manager_pending", "manager"]
+          && request.resource.data.organizationId == resource.data.organizationId
+          && request.resource.data.diff(resource.data).affectedKeys()
+               .hasOnly(["role", "active", "approvedAt", "approvedBy", "rejectedAt", "rejectedBy",
+                         "revokedAt", "revokedBy", "reinstatedAt", "reinstatedBy"]);
+    }
 
     // A profile's role/organization cannot be changed by the client after
     // creation — this is what stops a customer or technician from editing
@@ -61,7 +104,7 @@ service cloud.firestore {
     // can never touch organizationId. Only the role/audit/active fields may
     // move; everything else about the target profile is frozen in this op.
     function isManagerRoleToggle() {
-      return isManager()
+      return isManagerLike()
           && myOrg() == resource.data.organizationId
           && request.resource.data.organizationId == resource.data.organizationId
           && resource.data.role in ["customer", "technician"]
@@ -78,49 +121,107 @@ service cloud.firestore {
 
       // Create: only the account owner, and only for a role they're actually
       // allowed to self-assign:
-      //  - "manager"  → self-service registration (creates its own org)
+      //  - "manager_pending" → self-service registration, but this grants
+      //    NO manager access on its own (see isManager()/isManagerLike()
+      //    above, which only ever match role == "manager"). The Supreme
+      //    Admin must separately approve the request — see
+      //    isAdminManagerDecision() — before it becomes a working
+      //    "manager" account. This is the server-side enforcement of
+      //    "the admin grants manager access", not just a client-side gate.
       //  - "customer" → self-service registration
-      //  - "technician" → ONLY if a manager has already authorized this exact
-      //    email in /tech_authorizations with status "authorized". This is
-      //    the server-side enforcement of "admin controls technician roles" —
-      //    a client cannot fabricate a technician profile without it.
+      //  - "technician" → ONLY if a manager/admin has already authorized
+      //    this exact email in /tech_authorizations with status
+      //    "authorized". This is the server-side enforcement of "admin
+      //    controls technician roles" — a client cannot fabricate a
+      //    technician profile without it.
+      //  - "admin" → ONLY while the one-time Supreme Admin claim is still
+      //    unclaimed (see adminBootstrapAvailable() above). There is no
+      //    other path in these rules that can ever produce an "admin"
+      //    profile — nobody, including an existing admin, can promote a
+      //    second admin later. This is intentionally a single, narrow
+      //    bootstrap door, not an ongoing admin-creation feature.
       allow create: if isOwner(userId) && (
-        request.resource.data.role in ["manager", "customer"] ||
+        request.resource.data.role in ["manager_pending", "customer"] ||
         (
           request.resource.data.role == "technician" &&
           exists(/databases/$(database)/documents/tech_authorizations/$(request.resource.data.email)) &&
           get(/databases/$(database)/documents/tech_authorizations/$(request.resource.data.email)).data.status == "authorized"
+        ) ||
+        (
+          request.resource.data.role == "admin" &&
+          adminBootstrapAvailable()
         )
       );
 
       // Update: the owner can edit their own profile (role/org locked).
-      // A manager may ALSO update a technician's record in their own org
-      // (e.g. flip `active` to revoke/reinstate them, fix their employee
-      // ID) — but still can never change that technician's role or org
-      // through this branch. A manager may separately toggle a customer's
-      // or technician's role via isManagerRoleToggle() below — that is the
-      // ONLY path in these rules that is allowed to change a `role` field,
-      // and it explicitly excludes "manager" as a possible value on either
-      // side of the change.
+      // A manager or admin may ALSO update a technician's record in their
+      // own org (e.g. flip `active` to revoke/reinstate them, fix their
+      // employee ID) — but still can never change that technician's role
+      // or org through this branch. A manager/admin may separately toggle
+      // a customer's or technician's role via isManagerRoleToggle() below,
+      // and the admin may separately decide a manager_pending/manager
+      // account via isAdminManagerDecision() — those are the ONLY paths
+      // in these rules allowed to change a `role` field, and neither can
+      // ever produce or touch an "admin" or "manager_pending"→"manager"
+      // change outside the admin's own explicit decision.
       allow update: if (
         roleAndOrgUnchanged() && (
           isOwner(userId) ||
-          (isManager() && myOrg() == resource.data.organizationId && resource.data.role == "technician")
+          (isManagerLike() && myOrg() == resource.data.organizationId && resource.data.role == "technician")
         )
-      ) || isManagerRoleToggle() || isOrgSelfHeal(userId);
+      ) || isManagerRoleToggle() || isOrgSelfHeal(userId) || isAdminManagerDecision();
+    }
+
+    // ── Bootstrap Singleton (/meta/adminBootstrap) ─────────────────────────
+    // Tracks whether the one-time Supreme Admin claim has been used yet.
+    // Any signed-in user may read it (the login screen checks it to decide
+    // whether to show "Claim Supreme Admin Access" at all). It can only
+    // ever be created as unclaimed, and can only ever flip false -> true
+    // once — never back. The actual admin profile create (above) and this
+    // flip happen together in a single client-side Firestore transaction,
+    // so a race between two people claiming at the same instant can only
+    // ever let one of them through — Firestore's optimistic concurrency
+    // makes the loser's transaction retry, see it's already true, and abort.
+    match /meta/adminBootstrap {
+      allow read: if isAuth();
+      // Created once, directly with claimed:true, by the winning side of
+      // the claim transaction (see Auth.claimAdmin in data.js) — tied to
+      // the claimant's own uid so at least the doc can't be silently
+      // squatted by an unrelated write.
+      allow create: if isAuth() && request.resource.data.claimed == true && request.resource.data.claimedBy == request.auth.uid;
+      // Never allowed to flip back to false once claimed — this door
+      // closes permanently after the first successful claim.
+      allow update: if false;
+    }
+
+    // ── Private credentials (/users/{uid}/private/{docId}) ─────────────────
+    // Holds the ONE piece of password data this system can honestly ever
+    // show anyone back: the password a manager/admin themselves chose at
+    // the moment they created a technician's account (see
+    // managerCreateTechnician in data.js). It is NOT synced if the
+    // technician later changes their own password — Firebase never
+    // exposes a real password once a user has set one, by design, for
+    // anyone. Kept in its own subcollection (rather than a field on
+    // /users/{uid} itself) specifically so it is NEVER swept up by the
+    // org-wide "read anyone in my org" rule on /users above — only the
+    // account owner and a manager/admin in the same org can ever read it.
+    match /users/{userId}/private/{docId} {
+      allow read: if isOwner(userId) ||
+        (isManagerLike() && myOrg() == get(/databases/$(database)/documents/users/$(userId)).data.organizationId);
+      allow write: if isOwner(userId) || isManagerLike();
     }
 
     // ── Technician Authorizations (/tech_authorizations/{email}) ─────────────
     // This collection IS the access-control list for the technician role.
     match /tech_authorizations/{email} {
       allow read:  if isAuth(); // technicians self-check their own email during activation
-      allow write: if isManager(); // ONLY managers may authorize or revoke technicians
+      allow write: if isManagerLike(); // ONLY managers/admin may authorize or revoke technicians
     }
 
     // ── Jobs (/jobs/{jobId}) ───────────────────────────────────────────────
     match /jobs/{jobId} {
       allow read: if isAuth() && myOrg() == resource.data.organizationId && (
-        isManager() ||
+        isManagerLike() ||
         (isTechnician() && resource.data.assignedTo == request.auth.uid) ||
         (isCustomer() && resource.data.customerId == request.auth.uid)
       );
@@ -130,7 +231,7 @@ service cloud.firestore {
       // pending — they cannot pre-assign a technician or fabricate someone
       // else's request.
       allow create: if isAuth() && request.resource.data.organizationId == myOrg() && (
-        isManager() ||
+        isManagerLike() ||
         (
           isCustomer() &&
           request.resource.data.customerId == request.auth.uid &&
@@ -147,7 +248,7 @@ service cloud.firestore {
       // job, and only once (nothing else about the job can be touched
       // after submission).
       allow update: if isAuth() && myOrg() == resource.data.organizationId && (
-        isManager() ||
+        isManagerLike() ||
         (
           isTechnician() &&
           resource.data.assignedTo == request.auth.uid &&
@@ -175,7 +276,7 @@ service cloud.firestore {
       // not just the documents it can't verify — so customers listing
       // their own reports need a field on the report itself to filter on.
       allow read: if isAuth() && myOrg() == resource.data.organizationId && (
-        isManager() ||
+        isManagerLike() ||
         (isTechnician() && resource.data.technicianId == request.auth.uid) ||
         (isCustomer() && resource.data.customerId == request.auth.uid)
       );
@@ -192,7 +293,7 @@ service cloud.firestore {
         && request.resource.data.customerId == get(/databases/$(database)/documents/jobs/$(request.resource.data.jobId)).data.customerId;
 
       // Only a manager can review/approve a submitted report.
-      allow update: if isAuth() && isManager() && myOrg() == resource.data.organizationId;
+      allow update: if isAuth() && isManagerLike() && myOrg() == resource.data.organizationId;
     }
 
     // ── Org Counters (/counters/{orgId}) ──────────────────────────────────────

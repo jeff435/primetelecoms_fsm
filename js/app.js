@@ -70,6 +70,14 @@ function fmtDuration(startStr, endStr) {
   return `${hrs}h ${rem}m`;
 }
 
+// The admin has every manager power in the operational screens (jobs,
+// reports, staff, customers, reviews) PLUS the admin-only manager-approval
+// screen — this is the one helper used everywhere that used to just check
+// `user.role === "manager"` for UI/edit affordances.
+function isManagerLike(user) {
+  return !!user && (user.role === "manager" || user.role === "admin");
+}
+
 function starRating(n, max = 5) {
   const filled = "&#9733;".repeat(n || 0);
   const empty = "&#9734;".repeat(max - (n || 0));
@@ -96,7 +104,20 @@ function router() {
     return;
   }
 
+  // A self-registered manager sits in "manager_pending" (and a manager
+  // who was rejected/revoked keeps role manager_pending/manager with
+  // active:false) until the Supreme Admin decides — they get a dedicated
+  // waiting screen, full stop, regardless of what hash they typed. The
+  // profile listener in data.js (_startMyProfileListener) re-fires the
+  // router the instant the Supreme Admin approves them, so this screen
+  // clears itself without the person needing to refresh or re-navigate.
+  if (user.role === "manager_pending") {
+    renderPendingApproval(user);
+    return;
+  }
+
   const { route, parts } = parseHash();
+  const userIsManagerLike = user.role === "manager" || user.role === "admin";
 
   // ── Strict role-based route guard ───────────────────────────────────────
   // Each role is confined to its own slice of the app. Customers can never
@@ -107,8 +128,13 @@ function router() {
   // enforced in code, not just hidden in the nav, so typing the hash
   // directly can't bypass it either.
   const managerOnlyRoutes = ["staff", "customers", "reviews"];
+  const adminOnlyRoutes = ["admin"];
   const customerBlockedRoutes = ["staff", "reports"];
-  if (user.role !== "manager" && managerOnlyRoutes.includes(route)) {
+  if (!userIsManagerLike && managerOnlyRoutes.includes(route)) {
+    navigate("dashboard");
+    return;
+  }
+  if (user.role !== "admin" && adminOnlyRoutes.includes(route)) {
     navigate("dashboard");
     return;
   }
@@ -123,13 +149,20 @@ function router() {
 
   switch (route) {
     case "dashboard":
-      if (user.role === "manager") renderManagerDashboard(content, user);
+      if (user.role === "admin") renderAdminOverview(content, user);
+      else if (user.role === "manager") renderManagerDashboard(content, user);
       else if (user.role === "technician") renderTechDashboard(content, user);
       else renderCustomerDashboard(content, user);
       break;
 
+    case "admin":
+      // Only the admin reaches here (guard above) — manager-approval
+      // decisions (approve/reject/revoke/reinstate).
+      renderAdminManagers(content, user);
+      break;
+
     case "jobs":
-      if (user.role === "manager") {
+      if (userIsManagerLike) {
         if (parts[1] === "new") renderJobForm(content, user, null);
         else if (parts[1] && parts[2] === "edit") renderJobForm(content, user, parts[1]);
         else if (parts[1]) renderJobDetail(content, user, parts[1]);
@@ -260,6 +293,9 @@ function renderLogin() {
             Authorized Technician? <a href="#" id="link-activate" style="color:#0f172a;font-weight:600;">Activate Technician Account</a>
           </div>
         </div>
+        <div id="claim-admin-row" style="display:none;margin-top:10px;padding-top:10px;border-top:1px dashed #e2e8f0;font-size:12.5px;text-align:center;">
+          First time setting this up? <a href="#" id="link-claim-admin" style="color:#7c3aed;font-weight:700;">Claim Supreme Admin Access</a>
+        </div>
       </div>
     </div>
   `;
@@ -344,6 +380,92 @@ function renderLogin() {
     e.preventDefault();
     renderCustomerRegister();
   });
+
+  // ── Supreme Admin claim link — only ever shown while unclaimed ──────────
+  document.getElementById("link-claim-admin").addEventListener("click", (e) => {
+    e.preventDefault();
+    renderClaimAdmin();
+  });
+  Auth.isAdminBootstrapAvailable()
+    .then((available) => {
+      const row = document.getElementById("claim-admin-row");
+      if (available && row) row.style.display = "block";
+    })
+    .catch(() => {});
+}
+
+/* ============================================================
+   SUPREME ADMIN CLAIM — one-time setup, only available until claimed
+   ============================================================ */
+function renderClaimAdmin() {
+  appRoot.innerHTML = `
+    <div class="pt-auth-wrap">
+      <div class="pt-auth-card" style="max-width:500px;">
+        <div class="pt-auth-logo">PT</div>
+        <h4 style="font-weight:700;color:#0f172a;margin-bottom:4px;">Claim Supreme Admin Access</h4>
+        <p style="color:#64748b;font-size:13px;margin-bottom:18px;">
+          One-time setup for this deployment. Whoever claims this becomes the Supreme Admin — able to approve
+          new managers, manage every role, and see system-wide issues. This can only ever be claimed once;
+          if someone already has, you'll be sent back to Sign In.
+        </p>
+
+        <div id="admin-error" style="display:none;background:#FBE1E1;color:#D64545;padding:10px 14px;border-radius:10px;font-size:13px;margin-bottom:12px;"></div>
+
+        <div class="form-row cols-2">
+          <div><label class="form-label">First Name</label><input type="text" class="form-control" id="admin-fname" placeholder="Amina"></div>
+          <div><label class="form-label">Last Name</label><input type="text" class="form-control" id="admin-lname" placeholder="Yusuf"></div>
+        </div>
+        <div class="field">
+          <label class="form-label">Email Address</label>
+          <input type="email" class="form-control" id="admin-email" placeholder="admin@company.com">
+        </div>
+        <div class="form-row cols-2">
+          <div><label class="form-label">Password</label><input type="password" class="form-control" id="admin-pw" placeholder="Min. 6 characters"></div>
+          <div><label class="form-label">Confirm Password</label><input type="password" class="form-control" id="admin-pw2"></div>
+        </div>
+
+        <button class="btn btn-pt-primary btn-block" id="btn-claim-admin" style="margin-top:6px;background:#7c3aed;border-color:#7c3aed;">
+          Claim Supreme Admin Access
+        </button>
+        <div style="text-align:center;margin-top:12px;font-size:13px;">
+          <a href="#" id="back-to-login" style="color:#2563EB;">← Back to Sign In</a>
+        </div>
+      </div>
+    </div>
+  `;
+
+  const errEl = document.getElementById("admin-error");
+  function showErr(msg) { errEl.textContent = msg; errEl.style.display = "block"; }
+
+  document.getElementById("back-to-login").addEventListener("click", (e) => { e.preventDefault(); renderLogin(); });
+
+  document.getElementById("btn-claim-admin").addEventListener("click", async () => {
+    const btn    = document.getElementById("btn-claim-admin");
+    const fname  = document.getElementById("admin-fname").value.trim();
+    const lname  = document.getElementById("admin-lname").value.trim();
+    const email  = document.getElementById("admin-email").value.trim();
+    const pw     = document.getElementById("admin-pw").value;
+    const pw2    = document.getElementById("admin-pw2").value;
+
+    if (!fname || !lname || !email || !pw) { showErr("Please fill in all fields."); return; }
+    if (pw !== pw2) { showErr("Passwords do not match."); return; }
+    if (pw.length < 6) { showErr("Password must be at least 6 characters."); return; }
+
+    btn.disabled    = true;
+    btn.textContent = "Claiming access…";
+
+    try {
+      const fbUser = await Auth.claimAdmin(email, pw, fname, lname);
+      await Auth.loadProfile(fbUser);
+      toast("Supreme Admin access claimed. Welcome aboard.", "success");
+      navigate("dashboard");
+      router();
+    } catch (err) {
+      btn.disabled    = false;
+      btn.textContent = "Claim Supreme Admin Access";
+      showErr(err.message || "Failed to claim admin access.");
+    }
+  });
 }
 
 /* ============================================================
@@ -355,7 +477,7 @@ function renderRegister() {
       <div class="pt-auth-card" style="max-width:500px;">
         <div class="pt-auth-logo">PT</div>
         <h4 style="font-weight:700;color:#0f172a;margin-bottom:4px;">Register Organization</h4>
-        <p style="color:#64748b;font-size:13px;margin-bottom:18px;">Create a manager account and set up your organization.</p>
+        <p style="color:#64748b;font-size:13px;margin-bottom:18px;">Create a manager account and set up your organization. Your account is created right away, but a manager can't access the dashboard until the Supreme Admin approves the request.</p>
 
         <div id="reg-error" style="display:none;background:#FBE1E1;color:#D64545;padding:10px 14px;border-radius:10px;font-size:13px;margin-bottom:12px;"></div>
 
@@ -411,19 +533,22 @@ function renderRegister() {
       const displayName = `${fname} ${lname}`;
       const fbUser = await Auth.registerWithEmail(email, pw, displayName);
 
-      // Create Firestore profile with manager role.
+      // Create Firestore profile with the manager_pending role — NOT
+      // "manager" outright. A manager only gets real access once the
+      // Supreme Admin approves the request (see Users.setManagerStatus);
+      // until then the router below sends them to a waiting screen.
       // Single-tenant deployment: every account (manager, technician,
       // customer) shares DEFAULT_ORG_ID so customer requests are visible
       // to the manager and vice versa. See data.js for details.
       await Auth.loadProfile(fbUser, {
-        role: "manager",
+        role: "manager_pending",
         organizationId: DEFAULT_ORG_ID,
         orgName: org,
       });
       // Overwrite firstName/lastName correctly (displayName split may miss them)
       await Auth.updateProfile(fbUser.uid, { firstName: fname, lastName: lname, orgName: org });
 
-      toast(`Welcome to Prime Telecoms FSM, ${fname}!`, "success");
+      toast(`Account created, ${fname}. Waiting on Supreme Admin approval.`, "success");
       navigate("dashboard");
       router();
     } catch (err) {
@@ -644,14 +769,257 @@ function renderCustomerRegister() {
 }
 
 /* ============================================================
+   PENDING MANAGER APPROVAL — waiting / rejected screen
+   Shown by the router for any signed-in user whose role is still
+   "manager_pending", regardless of what hash they typed. Clears
+   itself automatically the instant the Supreme Admin decides —
+   see _startMyProfileListener in data.js, which re-fires the
+   router on any role/active change to the signed-in user's own
+   profile without requiring a manual refresh.
+   ============================================================ */
+function renderPendingApproval(user) {
+  const rejected = user.active === false;
+  appRoot.innerHTML = `
+    <div class="pt-auth-wrap">
+      <div class="pt-auth-card" style="text-align:center;">
+        <div class="pt-auth-logo">PT</div>
+        ${rejected ? `
+          <h4 style="font-weight:700;color:#D64545;margin-bottom:8px;">Access Not Granted</h4>
+          <p style="color:#64748b;font-size:13.5px;margin-bottom:20px;">
+            Your manager registration for <strong>${escapeHtml(user.orgName || "this organization")}</strong> was not
+            approved by the Supreme Admin. If you believe this is a mistake, contact your system administrator.
+          </p>
+        ` : `
+          <h4 style="font-weight:700;color:#0f172a;margin-bottom:8px;">Awaiting Admin Approval</h4>
+          <p style="color:#64748b;font-size:13.5px;margin-bottom:20px;">
+            Thanks, ${escapeHtml(user.firstName)} — your manager account for <strong>${escapeHtml(user.orgName || "your organization")}</strong>
+            has been created, but manager access needs to be approved by the Supreme Admin first. You'll be let in
+            automatically the moment it's approved — no need to keep refreshing this page.
+          </p>
+        `}
+        <button class="btn btn-pt-outline btn-block" id="btn-pending-logout">Sign Out</button>
+      </div>
+    </div>
+  `;
+  document.getElementById("btn-pending-logout").addEventListener("click", async () => {
+    await Auth.signOut();
+    navigate("dashboard");
+    router();
+  });
+}
+
+/* ============================================================
+   SUPREME ADMIN — Overview & Issues (the admin's #dashboard)
+   ============================================================ */
+function renderAdminOverview(el, user) {
+  setPageTitle("Supreme Admin — Overview", "System-wide status and open issues");
+  const jobs = Jobs.all();
+  const reports = Reports.all();
+  const pendingManagers = Users.pendingManagers();
+  const unassigned = jobs.filter((j) => j.status === "pending");
+  const staleUnassigned = unassigned.filter((j) => (Date.now() - new Date(j.createdAt).getTime()) > 24 * 60 * 60 * 1000);
+  const stuckInProgress = jobs.filter((j) => j.status === "in_progress" && j.startedAt && (Date.now() - new Date(j.startedAt).getTime()) > 3 * 24 * 60 * 60 * 1000);
+  const reportsAwaitingReview = reports.filter((r) => r.status === "submitted");
+  const lowReviews = Jobs.reviews().filter((j) => j.rating <= 2);
+  const ratedJobs = jobs.filter((j) => j.rating);
+  const avgRating = ratedJobs.length ? (ratedJobs.reduce((s, j) => s + j.rating, 0) / ratedJobs.length) : 0;
+
+  const issues = [];
+  if (pendingManagers.length) issues.push({ label: `${pendingManagers.length} manager request${pendingManagers.length > 1 ? "s" : ""} awaiting approval`, link: "#admin/managers", tone: "amber" });
+  if (staleUnassigned.length) issues.push({ label: `${staleUnassigned.length} job${staleUnassigned.length > 1 ? "s" : ""} unassigned for over 24 hours`, link: "#jobs", tone: "red" });
+  if (stuckInProgress.length) issues.push({ label: `${stuckInProgress.length} job${stuckInProgress.length > 1 ? "s" : ""} in progress for over 3 days`, link: "#jobs", tone: "amber" });
+  if (reportsAwaitingReview.length) issues.push({ label: `${reportsAwaitingReview.length} service report${reportsAwaitingReview.length > 1 ? "s" : ""} awaiting review`, link: "#reports", tone: "amber" });
+  if (lowReviews.length) issues.push({ label: `${lowReviews.length} low customer rating${lowReviews.length > 1 ? "s" : ""} (2★ or below)`, link: "#reviews", tone: "red" });
+
+  el.innerHTML = `
+    <div class="pt-grid-2-even" style="margin-bottom:18px;">
+      <div class="pt-stat-card"><div class="pt-stat-icon pt-icon-blue">&#128188;</div><div><div class="pt-stat-value">${jobs.length}</div><div class="pt-stat-label">Total Jobs</div></div></div>
+      <div class="pt-stat-card"><div class="pt-stat-icon pt-icon-amber">&#128101;</div><div><div class="pt-stat-value">${Users.technicians().length}</div><div class="pt-stat-label">Active Technicians</div></div></div>
+    </div>
+    <div class="pt-grid-2-even" style="margin-bottom:18px;">
+      <div class="pt-stat-card"><div class="pt-stat-icon pt-icon-green">&#128100;</div><div><div class="pt-stat-value">${Users.managers().length}</div><div class="pt-stat-label">Active Managers</div></div></div>
+      <div class="pt-stat-card"><div class="pt-stat-icon pt-icon-red">&#9888;</div><div><div class="pt-stat-value">${pendingManagers.length}</div><div class="pt-stat-label">Pending Manager Requests</div></div></div>
+    </div>
+    <div class="pt-grid-2-even" style="margin-bottom:18px;">
+      <div class="pt-stat-card"><div class="pt-stat-icon pt-icon-amber">&#9733;</div><div><div class="pt-stat-value">${avgRating ? avgRating.toFixed(1) : "—"}</div><div class="pt-stat-label">Avg. Customer Rating (${ratedJobs.length})</div></div></div>
+      <div class="pt-stat-card"><div class="pt-stat-icon pt-icon-blue">&#128100;</div><div><div class="pt-stat-value">${Users.customers().length}</div><div class="pt-stat-label">Customers</div></div></div>
+    </div>
+
+    <div class="pt-card" style="margin-bottom:16px;">
+      <div class="pt-card-title">Open Issues</div>
+      ${issues.length ? `
+        <div style="display:flex;flex-direction:column;gap:8px;">
+          ${issues.map((i) => `
+            <a href="${i.link}" style="display:flex;justify-content:space-between;align-items:center;padding:10px 14px;border-radius:10px;background:${i.tone === "red" ? "#FBE1E1" : "#fef3c7"};color:${i.tone === "red" ? "#D64545" : "#92400e"};text-decoration:none;font-size:13.5px;font-weight:600;">
+              <span>${i.label}</span><span>&#8594;</span>
+            </a>`).join("")}
+        </div>
+      ` : `<div class="pt-empty-state"><i>&#9989;</i>No open issues — everything looks healthy.</div>`}
+    </div>
+
+    <div class="pt-card">
+      <div class="pt-card-title">Quick Links</div>
+      <div style="display:flex;flex-wrap:wrap;gap:10px;">
+        <a href="#admin/managers" class="btn btn-pt-primary btn-sm">Manager Approvals</a>
+        <a href="#staff" class="btn btn-pt-outline btn-sm">Technicians</a>
+        <a href="#customers" class="btn btn-pt-outline btn-sm">Customers</a>
+        <a href="#jobs" class="btn btn-pt-outline btn-sm">All Jobs</a>
+        <a href="#reports" class="btn btn-pt-outline btn-sm">Service Reports</a>
+        <a href="#reviews" class="btn btn-pt-outline btn-sm">Customer Reviews</a>
+      </div>
+    </div>
+  `;
+}
+
+/* ============================================================
+   SUPREME ADMIN — Manager Approvals (#admin/managers)
+   ============================================================ */
+function renderAdminManagers(el, user) {
+  setPageTitle("Manager Approvals", "Approve, reject, or revoke manager access");
+  const pending = Users.pendingManagers();
+  const active = Users.managers();
+  const rejected = Users.rejectedManagers();
+
+  el.innerHTML = `
+    <div class="pt-card" style="margin-bottom:20px;">
+      <div class="pt-card-title">Pending Requests (${pending.length})</div>
+      ${pending.length ? `
+      <div class="pt-table-wrap"><table class="pt-table"><thead><tr><th>Name</th><th>Email</th><th>Organization</th><th>Requested</th><th></th></tr></thead><tbody>
+        ${pending.map((m) => `
+          <tr>
+            <td><strong>${escapeHtml(Users.fullName(m))}</strong></td>
+            <td>${escapeHtml(m.username || m.email)}</td>
+            <td>${escapeHtml(m.orgName) || "—"}</td>
+            <td title="${fmtDateTime(m.createdAt)}">${timeAgo(m.createdAt)}</td>
+            <td style="text-align:right;white-space:nowrap;">
+              <button class="btn btn-pt-primary btn-sm" data-approve="${m.id}">Approve</button>
+              <button class="btn btn-danger-outline btn-sm" data-reject="${m.id}">Reject</button>
+            </td>
+          </tr>`).join("")}
+      </tbody></table></div>` : `<div class="pt-empty-state"><i>&#9989;</i>No pending manager requests.</div>`}
+    </div>
+
+    <div class="pt-card" style="margin-bottom:20px;">
+      <div class="pt-card-title">Active Managers (${active.length})</div>
+      ${active.length ? `
+      <div class="pt-table-wrap"><table class="pt-table"><thead><tr><th>Name</th><th>Email</th><th>Organization</th><th>Approved</th><th></th></tr></thead><tbody>
+        ${active.map((m) => `
+          <tr>
+            <td><strong>${escapeHtml(Users.fullName(m))}</strong></td>
+            <td>${escapeHtml(m.username || m.email)}</td>
+            <td>${escapeHtml(m.orgName) || "—"}</td>
+            <td>${m.approvedAt ? fmtDate(m.approvedAt) : "—"}</td>
+            <td style="text-align:right;white-space:nowrap;">
+              <button class="btn btn-pt-outline btn-sm" data-reset-pw="${escapeHtml(m.email || m.username)}">Send Reset Email</button>
+              <button class="btn btn-danger-outline btn-sm" data-revoke-mgr="${m.id}">Revoke Access</button>
+            </td>
+          </tr>`).join("")}
+      </tbody></table></div>` : `<div class="pt-empty-state"><i>&#128100;</i>No active managers yet.</div>`}
+    </div>
+
+    <div class="pt-card">
+      <div class="pt-card-title">Rejected / Revoked (${rejected.length})</div>
+      ${rejected.length ? `
+      <div class="pt-table-wrap"><table class="pt-table"><thead><tr><th>Name</th><th>Email</th><th>Status</th><th></th></tr></thead><tbody>
+        ${rejected.map((m) => `
+          <tr>
+            <td><strong>${escapeHtml(Users.fullName(m))}</strong></td>
+            <td>${escapeHtml(m.username || m.email)}</td>
+            <td>${m.role === "manager_pending" ? "Rejected" : "Revoked"}</td>
+            <td style="text-align:right;"><button class="btn btn-pt-outline btn-sm" data-reinstate="${m.id}">Reinstate</button></td>
+          </tr>`).join("")}
+      </tbody></table></div>` : `<div class="pt-empty-state"><i>&#128100;</i>Nobody has been rejected or revoked.</div>`}
+    </div>
+  `;
+
+  el.querySelectorAll("[data-approve]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      btn.disabled = true;
+      try {
+        await Users.setManagerStatus(btn.getAttribute("data-approve"), "approve");
+        toast("Manager approved — they now have full access.", "success");
+      } catch (err) {
+        toast(err.message || "Failed to approve.", "error");
+        btn.disabled = false;
+      }
+    });
+  });
+  el.querySelectorAll("[data-reject]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      if (!confirm("Reject this manager request? They will not be able to access the system.")) return;
+      btn.disabled = true;
+      try {
+        await Users.setManagerStatus(btn.getAttribute("data-reject"), "reject");
+        toast("Manager request rejected.", "success");
+      } catch (err) {
+        toast(err.message || "Failed to reject.", "error");
+        btn.disabled = false;
+      }
+    });
+  });
+  el.querySelectorAll("[data-revoke-mgr]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      if (!confirm("Revoke this manager's access? They will be signed out of manager duties immediately.")) return;
+      btn.disabled = true;
+      try {
+        await Users.setManagerStatus(btn.getAttribute("data-revoke-mgr"), "revoke");
+        toast("Manager access revoked.", "success");
+      } catch (err) {
+        toast(err.message || "Failed to revoke.", "error");
+        btn.disabled = false;
+      }
+    });
+  });
+  el.querySelectorAll("[data-reinstate]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      btn.disabled = true;
+      try {
+        await Users.setManagerStatus(btn.getAttribute("data-reinstate"), "reinstate");
+        toast("Access reinstated.", "success");
+      } catch (err) {
+        toast(err.message || "Failed to reinstate.", "error");
+        btn.disabled = false;
+      }
+    });
+  });
+  el.querySelectorAll("[data-reset-pw]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const email = btn.getAttribute("data-reset-pw");
+      btn.disabled = true;
+      try {
+        await Auth.sendPasswordReset(email);
+        toast(`Password reset email sent to ${email}.`, "success");
+      } catch (err) {
+        toast(Auth.getErrorMessage(err.code) || err.message || "Couldn't send reset email.", "error");
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  });
+}
+
+/* ============================================================
    APP SHELL (sidebar + topbar)
    ============================================================ */
 function renderShell(user) {
+  const isAdmin = user.role === "admin";
   const isManager = user.role === "manager";
   const isTechnician = user.role === "technician";
   const isCustomer = user.role === "customer";
 
-  const mainNav = isManager ? `
+  const pendingCount = isAdmin ? Users.pendingManagers().length : 0;
+  const pendingBadge = pendingCount ? ` <span class="pt-badge badge-status-cancelled" style="margin-left:4px;">${pendingCount}</span>` : "";
+
+  const mainNav = isAdmin ? `
+          <a href="#dashboard" class="pt-nav-link" data-nav="dashboard"><i>&#9635;</i> Overview &amp; Issues</a>
+          <a href="#admin/managers" class="pt-nav-link" data-nav="admin"><i>&#128737;</i> Manager Approvals${pendingBadge}</a>
+          <div class="pt-nav-section-label">Operations</div>
+          <a href="#jobs" class="pt-nav-link" data-nav="jobs"><i>&#128188;</i> Jobs</a>
+          <a href="#reports" class="pt-nav-link" data-nav="reports"><i>&#128196;</i> Service Reports</a>
+          <a href="#staff" class="pt-nav-link" data-nav="staff"><i>&#128101;</i> Technicians</a>
+          <a href="#customers" class="pt-nav-link" data-nav="customers"><i>&#128100;</i> Customers</a>
+          <a href="#reviews" class="pt-nav-link" data-nav="reviews"><i>&#11088;</i> Customer Reviews</a>
+  ` : isManager ? `
           <a href="#dashboard" class="pt-nav-link" data-nav="dashboard"><i>&#9635;</i> Dashboard</a>
           <a href="#jobs" class="pt-nav-link" data-nav="jobs"><i>&#128188;</i> Jobs</a>
           <a href="#reports" class="pt-nav-link" data-nav="reports"><i>&#128196;</i> Service Reports</a>
@@ -675,7 +1043,7 @@ function renderShell(user) {
       <aside class="pt-sidebar" id="pt-sidebar">
         <div class="pt-sidebar-brand">
           <div class="pt-logo-mark">PT</div>
-          <div class="pt-brand-text"><strong>Prime Telecoms Limited</strong><span>${isCustomer ? "CUSTOMER PORTAL" : "FIELD SERVICE SYSTEM"}</span></div>
+          <div class="pt-brand-text"><strong>Prime Telecoms Limited</strong><span>${isAdmin ? "SUPREME ADMIN" : isCustomer ? "CUSTOMER PORTAL" : "FIELD SERVICE SYSTEM"}</span></div>
         </div>
         <nav class="pt-nav">
           <div class="pt-nav-section-label">Main</div>
@@ -1202,7 +1570,7 @@ function renderJobList(el, user) {
   el.innerHTML = `
     <div class="pt-page-header">
       <div></div>
-      ${user.role === "manager" ? `<a href="#jobs/new" class="btn btn-pt-amber">+ Assign New Job</a>` : ""}
+      ${isManagerLike(user) ? `<a href="#jobs/new" class="btn btn-pt-amber">+ Assign New Job</a>` : ""}
     </div>
     <form class="pt-filter-bar" id="job-filter-form">
       <div class="pt-filter-row">
@@ -1380,7 +1748,7 @@ function renderJobDetail(el, user, jobId) {
     <div class="pt-page-header">
       <div class="d-flex gap-2">${priorityBadge(job.priority)}${jobStatusBadge(job.status)}</div>
       <div class="d-flex gap-2">
-        ${user.role === "manager" ? `<a href="#jobs/${job.id}/edit" class="btn btn-pt-outline">Edit Job</a>` : ""}
+        ${isManagerLike(user) ? `<a href="#jobs/${job.id}/edit" class="btn btn-pt-outline">Edit Job</a>` : ""}
         ${report ? `<a href="#reports/${report.id}" class="btn btn-pt-outline">View Report</a>` : ""}
         ${canStartJob ? `<button class="btn btn-pt-primary" id="start-job-btn">&#9654; Start Job</button>` : ""}
         ${canSubmitReport ? `<a href="#reports/new/${job.id}" class="btn btn-pt-amber">Submit Service Report</a>` : ""}
@@ -1594,7 +1962,7 @@ function renderReportDetail(el, user, reportId) {
             <div class="pt-detail-label">Job Number</div><div class="pt-detail-value"><a href="#jobs/${job?.id}">${job?.jobNumber || "—"}</a></div>
             <div class="pt-detail-label">Site Location</div><div class="pt-detail-value mb-0">${escapeHtml(job?.siteLocation) || "—"}</div>
           </div>
-          ${user.role === "manager" ? `
+          ${isManagerLike(user) ? `
           <div class="pt-card">
             <div class="pt-card-title">Manager Review</div>
             <form id="review-form">
@@ -1632,7 +2000,7 @@ function renderReportDetail(el, user, reportId) {
    ============================================================ */
 function renderStaffList(el, user) {
   setPageTitle("Technicians & Staff", "Manage field technician and manager accounts");
-  const staff = Users.all();
+  const staff = Users.staff();
   el.innerHTML = `
     <div class="pt-card" style="max-width:600px;margin-bottom:20px;">
       <div class="pt-card-title">&#128101; Add a Technician</div>
@@ -1669,6 +2037,13 @@ function renderStaffList(el, user) {
     <div class="pt-page-header"><div></div></div>
     <div class="pt-card">
       <div class="pt-card-title">All Staff</div>
+      <p style="font-size:12.5px;color:#64748b;margin-bottom:12px;">
+        "Show Password" only works for technician accounts created right here with a manager-set password, and only
+        reflects the password as of account creation — it can't reveal a password someone has since changed
+        themselves. That's a hard Firebase limitation, not a bug: passwords are stored as one-way hashes and can
+        never be retrieved once a person has set their own. For everyone else, "Send Reset Email" is the secure,
+        standard way to get them a new one.
+      </p>
       ${staff.length ? `
       <div class="pt-table-wrap"><table class="pt-table"><thead><tr><th>Name</th><th>Employee ID</th><th>Role</th><th>Phone</th><th>Active Jobs</th><th>Status</th><th></th></tr></thead><tbody>
         ${staff.map((m) => `
@@ -1681,14 +2056,69 @@ function renderStaffList(el, user) {
             <td>${m.active !== false ? `<span class="pt-badge badge-status-completed">Active</span>` : `<span class="pt-badge badge-status-cancelled">Inactive</span>`}</td>
             <td style="text-align:right; white-space:nowrap;">
               ${m.role === "technician" ? `
+                <button class="btn btn-pt-outline btn-sm" data-show-pw="${m.id}">Show Password</button>
+                <button class="btn btn-pt-outline btn-sm" data-reset-pw="${escapeHtml(m.email || m.username)}">Send Reset Email</button>
                 <button class="btn btn-pt-outline btn-sm" data-make-customer="${m.id}">Make Customer</button>
                 <button class="btn btn-danger-outline btn-sm" data-revoke="${escapeHtml(m.email || m.username)}">Revoke</button>
+              ` : m.role === "manager" ? `
+                <button class="btn btn-pt-outline btn-sm" data-reset-pw="${escapeHtml(m.email || m.username)}">Send Reset Email</button>
               ` : ""}
             </td>
           </tr>`).join("")}
       </tbody></table></div>` : `<div class="pt-empty-state"><i>&#128101;</i>No staff members have joined yet. Authorize technicians above to get started.</div>`}
     </div>
   `;
+
+  // Reveal the password stored at account-creation time (technicians the
+  // manager/admin created directly with a chosen password only — see the
+  // explanatory note above the table for why this can't work for anyone
+  // else). Fetched lazily on click rather than upfront for the whole
+  // table, so nothing sensitive sits in the DOM until deliberately asked for.
+  el.querySelectorAll("[data-show-pw]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const id = btn.getAttribute("data-show-pw");
+      const original = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = "Loading…";
+      try {
+        const rec = await Auth.getStoredPassword(id);
+        if (!rec || !rec.lastKnownPassword) {
+          toast("No stored password on file for this account — it likely self-activated, or has changed its password since. Use \"Send Reset Email\" instead.", "info");
+          return;
+        }
+        const setWhen = rec.setAt ? fmtDateTime(rec.setAt) : "an earlier date";
+        const copy = confirm(
+          `Password set at account creation (by ${rec.setByName || "a manager"} on ${setWhen}):\n\n${rec.lastKnownPassword}\n\n` +
+          `Note: if this person has changed their password since, this will no longer work.\n\nClick OK to copy it to your clipboard.`
+        );
+        if (copy && navigator.clipboard) {
+          navigator.clipboard.writeText(rec.lastKnownPassword).catch(() => {});
+        }
+      } catch (err) {
+        toast(err.message || "Couldn't load the stored password.", "error");
+      } finally {
+        btn.disabled = false;
+        btn.textContent = original;
+      }
+    });
+  });
+
+  // Standard, secure password-reset email — the only option for any
+  // account whose password wasn't set here at creation time.
+  el.querySelectorAll("[data-reset-pw]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const email = btn.getAttribute("data-reset-pw");
+      btn.disabled = true;
+      try {
+        await Auth.sendPasswordReset(email);
+        toast(`Password reset email sent to ${email}.`, "success");
+      } catch (err) {
+        toast(Auth.getErrorMessage(err.code) || err.message || "Couldn't send reset email.", "error");
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  });
 
   // "Generate" fills in a random, reasonably strong temporary password.
   document.getElementById("btn-gen-pw").addEventListener("click", () => {
